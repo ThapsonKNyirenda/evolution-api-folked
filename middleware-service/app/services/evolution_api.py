@@ -40,6 +40,7 @@ class EvolutionAPIService:
                 json={
                     'number': phone_number,
                     'text': text,
+                    'delay': 500,
                 },
                 headers=self._headers(),
             )
@@ -47,6 +48,96 @@ class EvolutionAPIService:
             if response.content:
                 return response.json()
             return None
+
+    async def send_buttons(
+        self,
+        instance_name: str,
+        phone_number: str,
+        title: str,
+        description: str,
+        buttons: list[dict[str, str]],
+        footer: str | None = None,
+    ) -> dict[str, Any] | None:
+        payload: dict[str, Any] = {
+            'number': phone_number,
+            'title': title,
+            'description': description,
+            'buttons': buttons,
+            'delay': 500,
+        }
+        if footer:
+            payload['footer'] = footer
+
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            response = await client.post(
+                f'{self.base_url}/message/sendButtons/{instance_name}',
+                json=payload,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+            return None
+
+    async def send_list(
+        self,
+        instance_name: str,
+        phone_number: str,
+        title: str,
+        description: str,
+        button_text: str,
+        sections: list[dict[str, Any]],
+        footer: str | None = None,
+    ) -> dict[str, Any] | None:
+        payload: dict[str, Any] = {
+            'number': phone_number,
+            'title': title,
+            'description': description,
+            'buttonText': button_text,
+            'sections': sections,
+            'delay': 500,
+        }
+        if footer:
+            payload['footerText'] = footer
+
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            response = await client.post(
+                f'{self.base_url}/message/sendList/{instance_name}',
+                json=payload,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+            return None
+
+    async def send_message(
+        self, instance_name: str, phone_number: str, reply: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        msg_type = reply.get('type', 'text')
+
+        if msg_type == 'buttons':
+            return await self.send_buttons(
+                instance_name=instance_name,
+                phone_number=phone_number,
+                title=reply.get('title', ''),
+                description=reply.get('text', ''),
+                buttons=reply.get('buttons', []),
+                footer=reply.get('footer'),
+            )
+
+        if msg_type == 'list':
+            return await self.send_list(
+                instance_name=instance_name,
+                phone_number=phone_number,
+                title=reply.get('title', ''),
+                description=reply.get('text', ''),
+                button_text=reply.get('button_text', 'Select'),
+                sections=reply.get('sections', []),
+                footer=reply.get('footer'),
+            )
+
+        return await self.send_text_message(instance_name, phone_number, reply.get('text', ''))
 
     async def set_instance_webhook(self, instance_name: str, webhook_url: str) -> dict[str, Any] | None:
         async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:

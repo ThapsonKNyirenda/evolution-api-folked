@@ -5,7 +5,6 @@ import {
   evoaiController,
   evolutionBotController,
   flowiseController,
-  helpdeskController,
   n8nController,
   openaiController,
   typebotController,
@@ -14,7 +13,6 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 import { Logger } from '@config/logger.config';
 import { IntegrationSession } from '@prisma/client';
 import { findBotByTrigger } from '@utils/findBotByTrigger';
-import { getConversationMessage } from '@utils/getConversationMessage';
 
 export type EmitData = {
   instance: InstanceDto;
@@ -106,11 +104,6 @@ export class ChatbotController {
     evoaiController.emit(emitData);
 
     flowiseController.emit(emitData);
-
-    const content = getConversationMessage(msg);
-    if (content) {
-      helpdeskController.processIncomingMessage(emitData.instance, emitData.remoteJid, content, emitData.pushName);
-    }
   }
 
   public processDebounce(

@@ -43,22 +43,23 @@ async def start_consumer(rabbitmq: RabbitMQService):
                     logger.warning('Ignoring Evolution message without instance: %s', parsed.get('message_id'))
                     return
 
-                reply_text = ConversationService(db).process_message(
+                reply = ConversationService(db).process_message(
                     instance_name=instance_name,
                     phone_number=parsed['customer_phone_number'],
                     text=parsed['text'],
                     message_id=parsed.get('message_id'),
+                    push_name=parsed.get('push_name'),
                 )
 
                 evo = EvolutionAPIService()
                 try:
-                    await evo.send_text_message(instance_name, parsed.get('recipient') or parsed['customer_phone_number'], reply_text)
+                    await evo.send_message(instance_name, parsed.get('recipient') or parsed['customer_phone_number'], reply)
                 except Exception as e:
                     logger.warning('Failed to send reply via Evolution API: %s', e)
 
                 logger.info(
-                    'Conversation processed: instance=%s phone=%s reply_len=%d',
-                    instance_name, parsed['customer_phone_number'], len(reply_text),
+                    'Conversation processed: instance=%s phone=%s reply_type=%s',
+                    instance_name, parsed['customer_phone_number'], reply.get('type', 'unknown'),
                 )
             except Exception as e:
                 logger.error('Error processing RabbitMQ message: %s', e, exc_info=True)

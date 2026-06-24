@@ -27,6 +27,7 @@ class EvolutionEventParser:
         from_me = bool(data.get('fromMe') or key.get('fromMe'))
         participant = data.get('participant') or key.get('participant') or data.get('pushName')
         sender = data.get('sender') or data.get('from') or data.get('source')
+        push_name = data.get('pushName') or data.get('pushName', '')
 
         support_phone = normalize_phone_number(settings.support_whatsapp_number)
         remote_phone = normalize_phone_number(remote_jid)
@@ -47,6 +48,7 @@ class EvolutionEventParser:
             'customer_phone_number': customer_phone,
             'recipient': remote_jid or customer_phone,
             'instance': payload.get('instance') or data.get('instance'),
+            'push_name': push_name,
         }
 
     def _extract_text(self, data: dict[str, Any], message: dict[str, Any]) -> str | None:
@@ -69,6 +71,18 @@ class EvolutionEventParser:
         video_message = message.get('videoMessage')
         if isinstance(video_message, dict):
             candidates.append(video_message.get('caption'))
+
+        buttons_response = message.get('buttonsResponseMessage')
+        if isinstance(buttons_response, dict):
+            candidates.append(buttons_response.get('selectedButtonId'))
+            candidates.append(buttons_response.get('displayText'))
+
+        list_response = message.get('listResponseMessage')
+        if isinstance(list_response, dict):
+            single_reply = list_response.get('singleSelectReply', {})
+            if isinstance(single_reply, dict):
+                candidates.append(single_reply.get('selectedRowId'))
+            candidates.append(list_response.get('title'))
 
         for candidate in candidates:
             if isinstance(candidate, str) and candidate.strip():
