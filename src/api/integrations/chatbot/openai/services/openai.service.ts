@@ -1,7 +1,7 @@
 import { PrismaRepository } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
 import { Integration } from '@api/types/wa.types';
-import { ConfigService, Language, Openai as OpenaiConfig } from '@config/env.config';
+import { ConfigService, Openai as OpenaiConfig } from '@config/env.config';
 import { IntegrationSession, OpenaiBot, OpenaiSetting } from '@prisma/client';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
@@ -711,14 +711,10 @@ export class OpenaiService extends BaseChatbotService<OpenaiBot, OpenaiSetting> 
       );
     }
 
-    const lang = this.configService.get<Language>('LANGUAGE').includes('pt')
-      ? 'pt'
-      : this.configService.get<Language>('LANGUAGE');
-
     const formData = new FormData();
     formData.append('file', audio, 'audio.ogg');
     formData.append('model', 'whisper-1');
-    formData.append('language', lang);
+    formData.append('language', 'en');
 
     const apiKey = creds?.apiKey || this.configService.get<OpenaiConfig>('OPENAI').API_KEY_GLOBAL;
 

@@ -68,15 +68,15 @@ def _cancel_reply() -> dict:
 def _build_main_menu() -> dict:
     return _list_reply(
         text='Choose an option below to get started:',
-        title='\uD83D\uDC4B Welcome to Support!',
+        title='👋 Welcome to Support!',
         button_text='View Options',
         sections=[
             {
                 'title': 'Support Options',
                 'rows': [
-                    {'title': '\u2709\uFE0F Create Ticket', 'description': 'Report a new issue or request help', 'rowId': 'create_ticket'},
-                    {'title': '\uD83D\uDD0D Check Ticket', 'description': 'Check the status of an existing ticket', 'rowId': 'check_ticket'},
-                    {'title': '\uD83D\uDCAC Speak to Agent', 'description': 'Talk to a human support agent', 'rowId': 'speak_agent'},
+                    {'title': '✉️ Create Ticket', 'description': 'Report a new issue or request help', 'rowId': 'create_ticket'},
+                    {'title': '🔍 Check Ticket', 'description': 'Check the status of an existing ticket', 'rowId': 'check_ticket'},
+                    {'title': '💬 Speak to Agent', 'description': 'Talk to a human support agent', 'rowId': 'speak_agent'},
                 ],
             },
         ],
@@ -87,16 +87,16 @@ def _build_main_menu() -> dict:
 def _build_category_list() -> dict:
     return _list_reply(
         text='Which category best describes your issue?',
-        title='\uD83D\uDCC1 Issue Category',
+        title='📁 Issue Category',
         button_text='Select Category',
         sections=[
             {
                 'title': 'Categories',
                 'rows': [
-                    {'title': '\uD83C\uDF10 Network', 'description': 'Internet, connectivity, VPN issues', 'rowId': 'cat_network'},
-                    {'title': '\uD83D\uDCB3 Billing', 'description': 'Invoices, payments, subscriptions', 'rowId': 'cat_billing'},
-                    {'title': '\uD83D\uDD27 Technical Support', 'description': 'Software, hardware, system errors', 'rowId': 'cat_tech'},
-                    {'title': '\u2753 Other', 'description': 'Anything else not listed above', 'rowId': 'cat_other'},
+                    {'title': '🌐 Network', 'description': 'Internet, connectivity, VPN issues', 'rowId': 'cat_network'},
+                    {'title': '💳 Billing', 'description': 'Invoices, payments, subscriptions', 'rowId': 'cat_billing'},
+                    {'title': '🔧 Technical Support', 'description': 'Software, hardware, system errors', 'rowId': 'cat_tech'},
+                    {'title': '❓ Other', 'description': 'Anything else not listed above', 'rowId': 'cat_other'},
                 ],
             },
         ],
@@ -117,11 +117,11 @@ def _build_confirm_buttons(draft: dict) -> dict:
 
     return _buttons_reply(
         text=f'Please review and confirm your ticket details:\n\n{details}',
-        title='\u2705 Confirm Ticket',
+        title='✅ Confirm Ticket',
         buttons=[
-            {'type': 'reply', 'displayText': '\u2705 Submit', 'id': 'confirm_submit'},
-            {'type': 'reply', 'displayText': '\u270F\uFE0F Edit Subject', 'id': 'confirm_edit_subject'},
-            {'type': 'reply', 'displayText': '\u274C Cancel', 'id': 'confirm_cancel'},
+            {'type': 'reply', 'displayText': '✅ Submit', 'id': 'confirm_submit'},
+            {'type': 'reply', 'displayText': '✏️ Edit Subject', 'id': 'confirm_edit_subject'},
+            {'type': 'reply', 'displayText': '❌ Cancel', 'id': 'confirm_cancel'},
         ],
         footer='Choose an action',
     )
@@ -129,10 +129,10 @@ def _build_confirm_buttons(draft: dict) -> dict:
 
 def _build_ticket_created(ticket: Ticket) -> dict:
     return _text_reply(
-        f'\u2705 *Ticket Created Successfully!*\n\n'
-        f'\u2022 *Ticket Number:* `{ticket.ticket_number}`\n'
-        f'\u2022 *Status:* Open\n'
-        f'\u2022 *Category:* {ticket.category or "N/A"}\n\n'
+        f'✅ *Ticket Created Successfully!*\n\n'
+        f'• *Ticket Number:* `{ticket.ticket_number}`\n'
+        f'• *Status:* Open\n'
+        f'• *Category:* {ticket.category or "N/A"}\n\n'
         f'Our team will review your request and get back to you as soon as possible.\n\n'
         f'To return to the main menu at any time, send *0*.'
     )
@@ -140,19 +140,19 @@ def _build_ticket_created(ticket: Ticket) -> dict:
 
 def _build_ticket_status(ticket: Ticket) -> dict:
     return _text_reply(
-        f'\uD83D\uDD0D *Ticket Details*\n\n'
-        f'\u2022 *Number:* `{ticket.ticket_number}`\n'
-        f'\u2022 *Status:* `{ticket.status.upper()}`\n'
-        f'\u2022 *Subject:* {ticket.subject}\n'
-        f'\u2022 *Category:* {ticket.category or "N/A"}\n'
-        f'\u2022 *Created:* {ticket.created_at.strftime("%Y-%m-%d %H:%M")}\n\n'
+        f'🔍 *Ticket Details*\n\n'
+        f'• *Number:* `{ticket.ticket_number}`\n'
+        f'• *Status:* `{ticket.status.upper()}`\n'
+        f'• *Subject:* {ticket.subject}\n'
+        f'• *Category:* {ticket.category or "N/A"}\n'
+        f'• *Created:* {ticket.created_at.strftime("%Y-%m-%d %H:%M")}\n\n'
         f'Send *0* to return to the main menu.'
     )
 
 
 def _build_escalate_reply() -> dict:
     return _text_reply(
-        '\uD83D\uDCAC *Speak to Agent*\n\n'
+        '💬 *Speak to Agent*\n\n'
         'An agent will be with you shortly. In the meantime, please describe your issue '
         'and we will make sure the right team handles it.\n\n'
         'Send *0* to return to the main menu.'
@@ -161,7 +161,7 @@ def _build_escalate_reply() -> dict:
 
 def _build_subject_prompt() -> dict:
     return _text_reply(
-        '\u2709\uFE0F *Step 1: Subject*\n\n'
+        '✉️ *Step 1: Subject*\n\n'
         'Please enter a *short subject* for your ticket (e.g., "Internet not working", '
         '"Payment issue", "Account access problem").\n\n'
         'Keep it brief — one line is enough.\n\n'
@@ -171,11 +171,11 @@ def _build_subject_prompt() -> dict:
 
 def _build_description_prompt() -> dict:
     return _text_reply(
-        '\uD83D\uDCDD *Step 2: Description*\n\n'
+        '📝 *Step 2: Description*\n\n'
         'Now please describe your issue in *detail*:\n'
-        '\u2022 What happened?\n'
-        '\u2022 When did it start?\n'
-        '\u2022 Any error messages?\n\n'
+        '• What happened?\n'
+        '• When did it start?\n'
+        '• Any error messages?\n\n'
         'The more detail you provide, the faster we can help you.\n\n'
         'Send *0* at any time to cancel and return to the main menu.'
     )
@@ -260,7 +260,7 @@ class ConversationService:
         if choice in ('2', 'check_ticket', 'check ticket'):
             session.state = 'CHECKING_TICKET'
             return _text_reply(
-                '\uD83D\uDD0D *Check Ticket Status*\n\n'
+                '🔍 *Check Ticket Status*\n\n'
                 'Please enter your ticket number (e.g., `TKT-2026-00001`).\n\n'
                 'Send *0* to return to the main menu.'
             )
