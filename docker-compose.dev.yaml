@@ -1,0 +1,55 @@
+services:
+  api:
+    container_name: evolution_api
+    image: evolution/api:local
+    build: .
+    restart: always
+    ports:
+      - 8080:8080
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - evolution-net
+    env_file:
+      - .env
+    expose:
+      - 8080
+  
+  caddy:
+    container_name: evolution_caddy
+    image: docker.io/library/caddy:2
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./Docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - evolution-net
+      - dokploy-network
+
+  frontend:
+    container_name: evolution_frontend
+    image: evolution/manager:local
+    build: ./evolution-manager-v2
+    restart: always
+    ports:
+      - "3000:80"
+    networks:
+      - evolution-net
+
+volumes:
+  evolution_instances:
+
+
+networks:
+  evolution-net:
+    name: evolution-net
+    driver: bridge
+
