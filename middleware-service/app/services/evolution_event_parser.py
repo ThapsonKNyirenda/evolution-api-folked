@@ -2,6 +2,7 @@ import re
 from typing import Any
 
 from app.core.config import settings
+from app.utils.text_cleaner import clean_surrogates
 
 
 def normalize_phone_number(value: str | None) -> str | None:
@@ -86,6 +87,6 @@ class EvolutionEventParser:
 
         for candidate in candidates:
             if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
+                return clean_surrogates(candidate.strip())
 
         return None

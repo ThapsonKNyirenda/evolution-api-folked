@@ -66,41 +66,25 @@ def _cancel_reply() -> dict:
 
 
 def _build_main_menu() -> dict:
-    return _list_reply(
-        text='Choose an option below to get started:',
-        title='👋 Welcome to Support!',
-        button_text='View Options',
-        sections=[
-            {
-                'title': 'Support Options',
-                'rows': [
-                    {'title': '✉️ Create Ticket', 'description': 'Report a new issue or request help', 'rowId': 'create_ticket'},
-                    {'title': '🔍 Check Ticket', 'description': 'Check the status of an existing ticket', 'rowId': 'check_ticket'},
-                    {'title': '💬 Speak to Agent', 'description': 'Talk to a human support agent', 'rowId': 'speak_agent'},
-                ],
-            },
-        ],
-        footer='Select an option to continue',
+    return _text_reply(
+        '👋 *Welcome to Support!*\n\n'
+        'Choose an option below:\n\n'
+        '1️⃣ *Create Ticket* - Report a new issue or request help\n'
+        '2️⃣ *Check Ticket* - Check the status of an existing ticket\n'
+        '3️⃣ *Speak to Agent* - Talk to a human support agent\n\n'
+        'Reply with the number of your choice.'
     )
 
 
 def _build_category_list() -> dict:
-    return _list_reply(
-        text='Which category best describes your issue?',
-        title='📁 Issue Category',
-        button_text='Select Category',
-        sections=[
-            {
-                'title': 'Categories',
-                'rows': [
-                    {'title': '🌐 Network', 'description': 'Internet, connectivity, VPN issues', 'rowId': 'cat_network'},
-                    {'title': '💳 Billing', 'description': 'Invoices, payments, subscriptions', 'rowId': 'cat_billing'},
-                    {'title': '🔧 Technical Support', 'description': 'Software, hardware, system errors', 'rowId': 'cat_tech'},
-                    {'title': '❓ Other', 'description': 'Anything else not listed above', 'rowId': 'cat_other'},
-                ],
-            },
-        ],
-        footer='Pick the closest category',
+    return _text_reply(
+        '📁 *Issue Category*\n\n'
+        'Which category best describes your issue?\n\n'
+        '1️⃣ *Network* - Internet, connectivity, VPN issues\n'
+        '2️⃣ *Billing* - Invoices, payments, subscriptions\n'
+        '3️⃣ *Technical Support* - Software, hardware, system errors\n'
+        '4️⃣ *Other* - Anything else not listed above\n\n'
+        'Reply with the number of your choice.'
     )
 
 
@@ -115,15 +99,14 @@ def _build_confirm_buttons(draft: dict) -> dict:
         f'\u2022 *Category:* {category}\n'
     )
 
-    return _buttons_reply(
-        text=f'Please review and confirm your ticket details:\n\n{details}',
-        title='✅ Confirm Ticket',
-        buttons=[
-            {'type': 'reply', 'displayText': '✅ Submit', 'id': 'confirm_submit'},
-            {'type': 'reply', 'displayText': '✏️ Edit Subject', 'id': 'confirm_edit_subject'},
-            {'type': 'reply', 'displayText': '❌ Cancel', 'id': 'confirm_cancel'},
-        ],
-        footer='Choose an action',
+    return _text_reply(
+        f'✅ *Confirm Ticket*\n\n'
+        f'Please review and confirm your ticket details:\n\n'
+        f'{details}\n'
+        f'Reply:\n'
+        f'1️⃣ *Submit* - Create the ticket\n'
+        f'2️⃣ *Edit Subject* - Change the subject\n'
+        f'3️⃣ *Cancel* - Discard and return to menu'
     )
 
 

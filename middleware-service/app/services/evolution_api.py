@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.utils.text_cleaner import clean_surrogates
 
 
 class EvolutionAPIService:
@@ -111,9 +112,23 @@ class EvolutionAPIService:
                 return response.json()
             return None
 
+    def _clean_payload(self, data: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                result[key] = clean_surrogates(value)
+            elif isinstance(value, dict):
+                result[key] = self._clean_payload(value)
+            elif isinstance(value, list):
+                result[key] = [self._clean_payload(v) if isinstance(v, dict) else clean_surrogates(v) if isinstance(v, str) else v for v in value]
+            else:
+                result[key] = value
+        return result
+
     async def send_message(
         self, instance_name: str, phone_number: str, reply: dict[str, Any]
     ) -> dict[str, Any] | None:
+        reply = self._clean_payload(reply)
         msg_type = reply.get('type', 'text')
 
         if msg_type == 'buttons':
