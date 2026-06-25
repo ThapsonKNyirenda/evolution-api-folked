@@ -126,7 +126,7 @@ def _build_ticket_status(ticket: Ticket) -> dict:
         f'🔍 *Ticket Details*\n\n'
         f'• *Number:* `{ticket.ticket_number}`\n'
         f'• *Status:* `{ticket.status.upper()}`\n'
-        f'• *Subject:* {ticket.subject}\n'
+        f'• *Title:* {ticket.subject}\n'
         f'• *Category:* {ticket.category or "N/A"}\n'
         f'• *Created:* {ticket.created_at.strftime("%Y-%m-%d %H:%M")}\n\n'
         f'Send *0* to return to the main menu.'
@@ -225,7 +225,7 @@ class ConversationService:
             return self._handle_confirm(session, text, customer_id, tenant_id)
 
         if state in ('CHECKING_TICKET',):
-            return self._handle_check_ticket(session, text, tenant_id)
+            return self._handle_check_ticket(session, text, tenant_id, customer_id)
 
         session.state = 'MAIN_MENU'
         return _build_main_menu()
@@ -240,13 +240,23 @@ class ConversationService:
             session.state = 'WAITING_SUBJECT'
             return _build_subject_prompt()
 
-        if choice in ('2', 'check_ticket', 'check ticket'):
+        if choice in ('2', 'check_ticket', 'check ticket', 'my tickets', 'my_tickets'):
+            tickets = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=10)
+            if not tickets:
+                session.state = 'MAIN_MENU'
+                return _text_reply(
+                    '📭 *No Tickets Found*\n\n'
+                    'You have no tickets yet. Send *1* to create a new ticket.\n\n'
+                    '*0* to return to the main menu.'
+                )
+
+            lines = ['📋 *Your Tickets*\n']
+            for t in tickets:
+                lines.append(f'• `{t.ticket_number}` — *{t.subject[:50]}* ({t.status})')
+            lines.append('\nReply with a ticket number to see details, or *0* for menu.')
+
             session.state = 'CHECKING_TICKET'
-            return _text_reply(
-                '🔍 *Check Ticket Status*\n\n'
-                'Please enter your ticket number (e.g., `TKT-2026-00001`).\n\n'
-                'Send *0* to return to the main menu.'
-            )
+            return _text_reply('\n'.join(lines))
 
         if choice in ('3', 'speak_agent', 'speak to agent', 'agent'):
             session.state = 'MAIN_MENU'
@@ -266,7 +276,7 @@ class ConversationService:
             session.state = 'MAIN_MENU'
             return _cancel_reply()
 
-        draft = session.ticket_draft or {}
+        draft = dict(session.ticket_draft or {})
         draft['subject'] = text[:200]
         session.ticket_draft = draft
         session.state = 'WAITING_DESCRIPTION'
@@ -278,7 +288,7 @@ class ConversationService:
             session.state = 'MAIN_MENU'
             return _cancel_reply()
 
-        draft = session.ticket_draft or {}
+        draft = dict(session.ticket_draft or {})
         draft['description'] = text
         session.ticket_draft = draft
         session.state = 'WAITING_CATEGORY'
@@ -304,7 +314,7 @@ class ConversationService:
         if not category:
             return _build_category_list()
 
-        draft = session.ticket_draft or {}
+        draft = dict(session.ticket_draft or {})
         draft['category'] = category
         session.ticket_draft = draft
         session.state = 'CONFIRM_TICKET'
@@ -356,13 +366,13 @@ class ConversationService:
         draft = session.ticket_draft or {}
         return _build_confirm_buttons(draft)
 
-    def _handle_check_ticket(self, session: WhatsappSession, text: str, tenant_id: uuid.UUID) -> dict:
+    def _handle_check_ticket(self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID) -> dict:
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
 
         ticket_number = text.strip().upper()
-        ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+        ticket = self.tickets.get_by_number(ticket_number, tenant_id, customer_id)
 
         if not ticket:
             return _text_reply(

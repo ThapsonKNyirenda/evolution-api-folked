@@ -53,7 +53,7 @@ class TicketRepository:
             .first()
         )
 
-    def get_by_number(self, ticket_number: str, tenant_id: uuid.UUID | None = None) -> Ticket | None:
+    def get_by_number(self, ticket_number: str, tenant_id: uuid.UUID | None = None, customer_id: uuid.UUID | None = None) -> Ticket | None:
         normalized = ticket_number.upper().lstrip('#')
         query = self.db.query(Ticket).filter(
             Ticket.ticket_number == normalized,
@@ -61,6 +61,8 @@ class TicketRepository:
         )
         if tenant_id is not None:
             query = query.filter(Ticket.tenant_id == tenant_id)
+        if customer_id is not None:
+            query = query.filter(Ticket.customer_id == customer_id)
         return query.first()
 
     def list_all(
