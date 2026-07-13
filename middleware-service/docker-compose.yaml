@@ -8,14 +8,16 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://middleware_user:middleware_pass@host.containers.internal:5435/middleware_db
+      DATABASE_URL: postgresql+psycopg2://middleware_user:middleware_pass@middleware-postgres:5432/middleware_db
       RABBITMQ_URL: amqp://middleware_user:middleware_pass@rabbitmq:5672/
-      EVOLUTION_API_BASE_URL: http://host.containers.internal:8080
     depends_on:
       - postgres
       - rabbitmq
     ports:
       - '8090:8090'
+    networks:
+      - middleware-net
+      - helpdesk_prod_network
 
   postgres:
     image: docker.io/library/postgres:16-alpine
@@ -29,6 +31,8 @@ services:
       - '5435:5432'
     volumes:
       - middleware_postgres_data:/var/lib/postgresql/data
+    networks:
+      - middleware-net
 
   rabbitmq:
     image: docker.io/library/rabbitmq:3-management-alpine
@@ -40,6 +44,14 @@ services:
     ports:
       - '5672:5672'
       - '15672:15672'
+    networks:
+      - middleware-net
 
 volumes:
   middleware_postgres_data:
+
+networks:
+  middleware-net:
+    driver: bridge
+  helpdesk_prod_network:
+    external: true

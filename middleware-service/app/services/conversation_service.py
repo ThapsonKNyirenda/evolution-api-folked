@@ -3,7 +3,6 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.models.ticket import Ticket
 from app.models.whatsapp_session import WhatsappSession
 from app.repositories import (
     CustomerRepository,
@@ -12,6 +11,7 @@ from app.repositories import (
     TicketRepository,
     WhatsappSessionRepository,
 )
+from app.services.helpdesk_api import HelpdeskAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -127,25 +127,34 @@ def _build_confirm_buttons(draft: dict) -> dict:
     )
 
 
-def _build_ticket_created(ticket: Ticket) -> dict:
+def _build_ticket_created(ticket_data: dict) -> dict:
+    ticket_number = ticket_data.get('ticket_number', 'N/A')
+    category = ticket_data.get('category') or 'N/A'
     return _text_reply(
         f'\u2705 *Ticket Created Successfully!*\n\n'
-        f'\u2022 *Ticket Number:* `{ticket.ticket_number}`\n'
+        f'\u2022 *Ticket Number:* `{ticket_number}`\n'
         f'\u2022 *Status:* Open\n'
-        f'\u2022 *Category:* {ticket.category or "N/A"}\n\n'
+        f'\u2022 *Category:* {category}\n\n'
         f'Our team will review your request and get back to you as soon as possible.\n\n'
         f'To return to the main menu at any time, send *0*.'
     )
 
 
-def _build_ticket_status(ticket: Ticket) -> dict:
+def _build_ticket_status(ticket_data: dict) -> dict:
+    ticket_number = ticket_data.get('ticket_number', 'N/A')
+    status = ticket_data.get('status', 'UNKNOWN')
+    title = ticket_data.get('title', 'N/A')
+    category = ticket_data.get('category') or 'N/A'
+    created_at_raw = ticket_data.get('created_at', '')
+    created_str = created_at_raw[:10] if created_at_raw and len(created_at_raw) >= 10 else 'N/A'
+
     return _text_reply(
         f'\uD83D\uDD0D *Ticket Details*\n\n'
-        f'\u2022 *Number:* `{ticket.ticket_number}`\n'
-        f'\u2022 *Status:* `{ticket.status.upper()}`\n'
-        f'\u2022 *Subject:* {ticket.subject}\n'
-        f'\u2022 *Category:* {ticket.category or "N/A"}\n'
-        f'\u2022 *Created:* {ticket.created_at.strftime("%Y-%m-%d %H:%M")}\n\n'
+        f'\u2022 *Number:* `{ticket_number}`\n'
+        f'\u2022 *Status:* `{status}`\n'
+        f'\u2022 *Subject:* {title}\n'
+        f'\u2022 *Category:* {category}\n'
+        f'\u2022 *Created:* {created_str}\n\n'
         f'Send *0* to return to the main menu.'
     )
 
@@ -189,6 +198,7 @@ class ConversationService:
         self.ticket_messages = TicketMessageRepository(db)
         self.sessions = WhatsappSessionRepository(db)
         self.instance_tenants = InstanceTenantRepository(db)
+        self.helpdesk_api = HelpdeskAPIClient()
 
     def _is_session_stale(self, session: WhatsappSession) -> bool:
         from datetime import datetime, timedelta
@@ -342,6 +352,29 @@ class ConversationService:
                 session.state = 'WAITING_SUBJECT'
                 return _build_subject_prompt()
 
+            # Get the customer's phone number for the helpdesk API call
+            customer = self.customers.get(customer_id)
+            phone_number = customer.phone_number if customer else ''
+
+            # Create ticket via the real helpdesk backend
+            ticket_data = self.helpdesk_api.create_ticket(
+                tenant_id=tenant_id,
+                phone_number=phone_number,
+                subject=subject,
+                description=description,
+                category=category,
+                customer_name=customer.name if customer else None,
+            )
+
+            if ticket_data:
+                session.ticket_draft = None
+                session.state = 'MAIN_MENU'
+                return _build_ticket_created(ticket_data)
+
+            # Fallback: if helpdesk API fails, use local database
+            logger.warning(
+                "Helpdesk API unavailable, falling back to local ticket creation"
+            )
             ticket = self.tickets.create(
                 tenant_id=tenant_id,
                 customer_id=customer_id,
@@ -359,7 +392,10 @@ class ConversationService:
 
             session.ticket_draft = None
             session.state = 'MAIN_MENU'
-            return _build_ticket_created(ticket)
+            return _build_ticket_created({
+                'ticket_number': ticket.ticket_number,
+                'category': ticket.category,
+            })
 
         if normalized in ('confirm_edit_subject', '2', 'edit subject', 'edit'):
             session.state = 'WAITING_SUBJECT'
@@ -379,13 +415,29 @@ class ConversationService:
             return _cancel_reply()
 
         ticket_number = text.strip().upper()
-        ticket = self.tickets.get_by_number(ticket_number, tenant_id)
 
-        if not ticket:
-            return _text_reply(
-                f'\u274C Ticket `{ticket_number}` was not found.\n\n'
-                'Please check the number and try again, or send *0* to return to the main menu.'
-            )
+        # Look up ticket via the real helpdesk backend
+        ticket_data = self.helpdesk_api.get_ticket_status(
+            ticket_number=ticket_number,
+            tenant_id=tenant_id,
+        )
+
+        if not ticket_data:
+            # Fallback: try local database
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            if not ticket:
+                return _text_reply(
+                    f'\u274C Ticket `{ticket_number}` was not found.\n\n'
+                    'Please check the number and try again, or send *0* to return to the main menu.'
+                )
+            session.state = 'MAIN_MENU'
+            return _build_ticket_status({
+                'ticket_number': ticket.ticket_number,
+                'status': ticket.status.upper(),
+                'title': ticket.subject,
+                'category': ticket.category,
+                'created_at': str(ticket.created_at),
+            })
 
         session.state = 'MAIN_MENU'
-        return _build_ticket_status(ticket)
+        return _build_ticket_status(ticket_data)

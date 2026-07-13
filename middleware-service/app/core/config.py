@@ -26,5 +26,11 @@ class Settings(BaseSettings):
     default_tenant_name: str = ''
     default_instance_name: str = ''
 
+    # Helpdesk backend API configuration
+    helpdesk_api_base_url: str = 'http://host.containers.internal:8000'
+    helpdesk_api_key: str = ''
+    helpdesk_api_timeout: int = 30
+    helpdesk_default_tenant_id: str = ''
+
 
 settings = Settings()
