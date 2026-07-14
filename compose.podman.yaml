@@ -12,11 +12,14 @@ services:
       - evolution_instances:/evolution/instances
     networks:
       - evolution-net
-      - dokploy-network
+      - helpdesk_prod_network
     env_file:
       - .env
+    environment:
+      - CACHE_REDIS_URI=redis://evolution-redis:6379/6
     expose:
       - "8080"
+
   caddy:
     container_name: evolution_caddy
     image: docker.io/library/caddy:2
@@ -34,21 +37,21 @@ services:
       - caddy_config:/config
     networks:
       - evolution-net
-      - dokploy-network
+      - helpdesk_prod_network
 
   frontend:
     container_name: evolution_frontend
     image: docker.io/evoapicloud/evolution-manager:latest
     restart: always
     ports:
-      - "3000:80"
+      - "3001:80"
     networks:
       - evolution-net
     volumes:
       - ./nginx.frontend.conf:/etc/nginx/conf.d/nginx.conf:ro
 
   redis:
-    container_name: evolution_redis
+    container_name: evolution-redis
     image: docker.io/library/redis:latest
     restart: always
     command: >
@@ -59,14 +62,14 @@ services:
       evolution-net:
         aliases:
           - evolution-redis
-      dokploy-network:
+      helpdesk_prod_network:
         aliases:
           - evolution-redis
     expose:
       - "6379"
 
   evolution-postgres:
-    container_name: evolution_postgres
+    container_name: evolution-postgres
     image: docker.io/library/postgres:15
     restart: always
     env_file:
@@ -85,9 +88,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - evolution-net
-      - dokploy-network
+      - helpdesk_prod_network
     ports:
-      - "5432:5432"
+      - "5433:5432"
 
 volumes:
   evolution_instances:
@@ -100,5 +103,5 @@ networks:
   evolution-net:
     name: evolution-net
     driver: bridge
-  dokploy-network:
+  helpdesk_prod_network:
     external: true
