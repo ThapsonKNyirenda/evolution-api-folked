@@ -2,15 +2,17 @@
 Helpdesk Backend API Client
 
 HTTP client that connects the middleware service to the real helpdesk backend.
-Replaces local database operations with API calls to the helpdesk system's
-WhatsApp integration endpoints.
+Supports both API-key and JWT authentication (JWT uses the shared SECRET_KEY).
+Provides methods for customer sync, ticket operations, and health checks.
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import httpx
+import jwt
 
 from app.core.config import settings
 
@@ -25,6 +27,8 @@ class HelpdeskAPIClient:
         self.api_key = settings.helpdesk_api_key
         self.timeout = settings.helpdesk_api_timeout
         self.default_tenant_id = settings.helpdesk_default_tenant_id
+        self._jwt_token: str | None = None
+        self._jwt_expiry: datetime | None = None
 
         if not self.api_key:
             logger.warning(
@@ -32,11 +36,42 @@ class HelpdeskAPIClient:
                 "authenticate with the helpdesk backend."
             )
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Content-Type": "application/json",
-            "X-API-Key": self.api_key,
+    # ── Authentication ─────────────────────────────────────
+
+    def _generate_jwt_token(self) -> str:
+        """Generate a JWT token using the shared SECRET_KEY for helpdesk API auth."""
+        now = datetime.utcnow()
+        payload = {
+            "sub": settings.helpdesk_service_username,
+            "user": {
+                "id": str(settings.helpdesk_service_username),
+                "email": f"{settings.helpdesk_service_username}@middleware.local",
+                "username": settings.helpdesk_service_username,
+                "tenant_id": self.default_tenant_id,
+                "type": "service",
+            },
+            "iat": now,
+            "exp": now + timedelta(hours=1),
         }
+        return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+    def _get_jwt_token(self) -> str:
+        """Get a valid JWT token, generating a new one if expired."""
+        if not self._jwt_token or not self._jwt_expiry or datetime.utcnow() >= self._jwt_expiry:
+            self._jwt_token = self._generate_jwt_token()
+            self._jwt_expiry = datetime.utcnow() + timedelta(minutes=55)
+        return self._jwt_token
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+
+        # Prefer JWT auth if enabled, fall back to API key
+        if settings.helpdesk_jwt_enabled:
+            headers["Authorization"] = f"Bearer {self._get_jwt_token()}"
+        elif self.api_key:
+            headers["X-API-Key"] = self.api_key
+
+        return headers
 
     def _tenant_id(self, tenant_id: str | UUID | None = None) -> str:
         """Resolve tenant ID from argument or default."""
@@ -47,6 +82,107 @@ class HelpdeskAPIClient:
         raise ValueError(
             "No tenant_id provided and HELPDESK_DEFAULT_TENANT_ID is not configured"
         )
+
+    # ── Customer Operations ────────────────────────────────
+
+    def lookup_customer_by_phone(
+        self,
+        phone_number: str,
+        tenant_id: str | UUID | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Look up a customer in the main helpdesk system by phone number.
+        Returns the customer data including id, tenant_id, name, etc., or None.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/customers/lookup/phone"
+        params = {
+            "phone_number": phone_number,
+            "tenant_id": self._tenant_id(tenant_id),
+        }
+
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error looking up customer (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return None
+        except httpx.RequestError as e:
+            logger.error(
+                "Helpdesk API request error looking up customer: %s", e
+            )
+            return None
+
+    def create_customer(
+        self,
+        tenant_id: str | UUID,
+        phone_number: str,
+        customer_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Create a customer record in the main helpdesk system for a WhatsApp user.
+        Returns the created customer data, or None on failure.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/customers"
+        payload = {
+            "tenant_id": self._tenant_id(tenant_id),
+            "phone_number": phone_number,
+            "customer_name": customer_name,
+        }
+
+        try:
+            response = httpx.post(
+                url,
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(
+                "Helpdesk customer created/retrieved: id=%s phone=%s",
+                result.get("id", "?"),
+                phone_number,
+            )
+            return result
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error creating customer (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return None
+        except httpx.RequestError as e:
+            logger.error(
+                "Helpdesk API request error creating customer: %s", e
+            )
+            return None
+
+    def get_or_create_customer(
+        self,
+        tenant_id: str | UUID,
+        phone_number: str,
+        customer_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Look up a customer by phone number, creating one if not found.
+        This is the primary method to sync customers between middleware and helpdesk.
+        """
+        customer = self.lookup_customer_by_phone(phone_number, tenant_id)
+        if customer:
+            return customer
+        return self.create_customer(tenant_id, phone_number, customer_name)
 
     # ── Ticket Operations ──────────────────────────────────
 
@@ -61,7 +197,7 @@ class HelpdeskAPIClient:
     ) -> dict[str, Any] | None:
         """
         Create a ticket in the helpdesk backend.
-        Returns the created ticket data, or None on failure.
+        Returns the created ticket data (including id and ticket_number), or None on failure.
         """
         url = f"{self.base_url}/api/v1/whatsapp/tickets"
         payload = {
@@ -83,8 +219,9 @@ class HelpdeskAPIClient:
             response.raise_for_status()
             result = response.json()
             logger.info(
-                "Helpdesk ticket created: #%s for %s",
+                "Helpdesk ticket created: #%s (id=%s) for %s",
                 result.get("ticket_number", "?"),
+                result.get("id", "?"),
                 phone_number,
             )
             return result

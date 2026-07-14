@@ -205,6 +205,39 @@ class ConversationService:
         cutoff = datetime.utcnow() - timedelta(minutes=SESSION_TIMEOUT_MINUTES)
         return session.last_activity < cutoff and session.state != 'MAIN_MENU'
 
+    def _sync_customer_with_helpdesk(
+        self, phone_number: str, tenant_id: uuid.UUID, push_name: str | None = None
+    ) -> None:
+        """
+        Ensure the customer exists in the main helpdesk system and link them.
+        Updates the local customer record with the helpdesk_customer_id.
+        """
+        try:
+            helpdesk_customer = self.helpdesk_api.get_or_create_customer(
+                tenant_id=tenant_id,
+                phone_number=phone_number,
+                customer_name=push_name,
+            )
+            if helpdesk_customer and helpdesk_customer.get("id"):
+                helpdesk_id = helpdesk_customer["id"]
+                # Update local customer record with helpdesk reference
+                local_customer = self.customers.get_by_phone_and_tenant(
+                    phone_number, tenant_id
+                )
+                if local_customer and not local_customer.helpdesk_customer_id:
+                    self.customers.update(
+                        local_customer,
+                        helpdesk_customer_id=uuid.UUID(helpdesk_id)
+                        if isinstance(helpdesk_id, str)
+                        else helpdesk_id,
+                    )
+        except Exception as e:
+            logger.warning(
+                "Failed to sync customer with helpdesk: %s (phone=%s, continuing with local)",
+                e,
+                phone_number,
+            )
+
     def process_message(
         self, instance_name: str, phone_number: str, text: str, message_id: str | None = None, push_name: str | None = None
     ) -> dict:
@@ -222,6 +255,9 @@ class ConversationService:
             name = push_name or ''
             if name:
                 self.customers.update(customer, name=name)
+
+        # Sync customer with main helpdesk system (best-effort)
+        self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
 
         if self._is_session_stale(session):
             session.ticket_draft = None
@@ -367,6 +403,26 @@ class ConversationService:
             )
 
             if ticket_data:
+                # Store the helpdesk ticket reference locally
+                helpdesk_ticket_id = ticket_data.get("id")
+                if helpdesk_ticket_id:
+                    try:
+                        self.tickets.create(
+                            tenant_id=tenant_id,
+                            customer_id=customer_id,
+                            subject=subject,
+                            description=description,
+                            category=category,
+                            source='whatsapp',
+                            helpdesk_ticket_id=uuid.UUID(helpdesk_ticket_id)
+                            if isinstance(helpdesk_ticket_id, str)
+                            else helpdesk_ticket_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to create local ticket reference: %s", e
+                        )
+
                 session.ticket_draft = None
                 session.state = 'MAIN_MENU'
                 return _build_ticket_created(ticket_data)

@@ -32,5 +32,12 @@ class Settings(BaseSettings):
     helpdesk_api_timeout: int = 30
     helpdesk_default_tenant_id: str = ''
 
+    # Shared authentication with main helpdesk system
+    # Uses the same SECRET_KEY and ALGORITHM as the main helpdesk for JWT token generation
+    secret_key: str = 'X0FZ0-_XAhFD9zCHZLZk6ePIvAL7WyyojU4L0Xm3-8Y'
+    algorithm: str = 'HS256'
+    helpdesk_jwt_enabled: bool = True
+    helpdesk_service_username: str = 'whatsapp-middleware'
+
 
 settings = Settings()

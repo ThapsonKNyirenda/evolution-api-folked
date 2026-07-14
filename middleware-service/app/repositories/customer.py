@@ -38,6 +38,13 @@ class CustomerRepository:
     def get(self, customer_id: uuid.UUID) -> Customer | None:
         return self.db.query(Customer).filter(Customer.id == customer_id).first()
 
+    def get_by_helpdesk_id(self, helpdesk_customer_id: uuid.UUID) -> Customer | None:
+        return (
+            self.db.query(Customer)
+            .filter(Customer.helpdesk_customer_id == helpdesk_customer_id)
+            .first()
+        )
+
     def list_all(self, tenant_id: uuid.UUID | None = None, limit: int = 50, offset: int = 0) -> list[Customer]:
         query = self.db.query(Customer)
         if tenant_id is not None:
