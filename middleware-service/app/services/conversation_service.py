@@ -84,7 +84,7 @@ def _build_main_menu() -> dict:
             {'type': 'reply', 'displayText': '🔍 Check Ticket', 'id': 'check_ticket'},
             {'type': 'reply', 'displayText': '💬 Speak to Agent', 'id': 'speak_agent'},
         ],
-        footer='Select an option to continue',
+        footer='Or type 0 to see the menu',
     )
 
 
@@ -119,7 +119,30 @@ def _build_confirm_buttons(draft: dict) -> dict:
             {'type': 'reply', 'displayText': '\u270F\uFE0F Edit Subject', 'id': 'confirm_edit_subject'},
             {'type': 'reply', 'displayText': '\u274C Cancel', 'id': 'confirm_cancel'},
         ],
-        footer='Choose an action',
+        footer='Or send 0 to cancel',
+    )
+
+
+def _build_confirm_text(draft: dict) -> dict:
+    """Text-based confirm prompt for when user sends invalid input at confirm step."""
+    subject = draft.get('subject', 'N/A')[:100]
+    description = draft.get('description', 'N/A')
+    category = draft.get('category', 'N/A')
+
+    details = (
+        f'\u2022 *Subject:* {subject}\n'
+        f'\u2022 *Description:* {description}\n'
+        f'\u2022 *Category:* {category}\n'
+    )
+
+    return _text_reply(
+        f'\u2705 *Confirm Ticket*\n\n'
+        f'{details}\n'
+        f'Reply with:\n'
+        f'1️⃣ Submit\n'
+        f'2️⃣ Edit Subject\n'
+        f'3️⃣ Cancel\n'
+        f'0️⃣ Main Menu'
     )
 
 
@@ -361,9 +384,9 @@ class ConversationService:
             session.state = 'MAIN_MENU'
             return _build_escalate_reply()
 
-        # For unrecognized text, show the interactive button menu
-        # This ensures new users see the welcome menu first
-        return _build_main_menu()
+        # For unrecognized text, show the text menu instead of buttons
+        # (buttons may not display properly if previous ones are still visible)
+        return _cancel_reply()
 
     def _handle_subject(self, session: WhatsappSession, text: str) -> dict:
         if _is_cancel(text):
@@ -508,7 +531,7 @@ class ConversationService:
             return _cancel_reply()
 
         draft = session.ticket_draft or {}
-        return _build_confirm_buttons(draft)
+        return _build_confirm_text(draft)
 
     def _handle_check_ticket(self, session: WhatsappSession, text: str, tenant_id: uuid.UUID) -> dict:
         if _is_cancel(text):
@@ -530,9 +553,13 @@ class ConversationService:
             # Fallback: try local database
             ticket = self.tickets.get_by_number(ticket_number, tenant_id)
             if not ticket:
+                # Re-show the check ticket prompt with the error
                 return _text_reply(
                     f'\u274C Ticket `{ticket_number}` was not found.\n\n'
-                    'Please check the number and try again, or send *0* to return to the main menu.'
+                    'Please check the number and try again.\n\n'
+                    '🔍 *Check Ticket Status*\n'
+                    'Enter your ticket number (e.g., TKT-2026-00001).\n\n'
+                    'Send *0* to return to the main menu.'
                 )
             session.state = 'MAIN_MENU'
             return _build_ticket_status({
