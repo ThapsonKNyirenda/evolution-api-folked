@@ -537,3 +537,111 @@ class HelpdeskAPIClient:
                 "Helpdesk API request error checking user registration: %s", e
             )
             return None
+
+    # ── Phone-User Linking ────────────────────────────────
+
+    def link_phone_to_user(
+        self,
+        phone_number: str,
+        user_id: str | UUID,
+        tenant_id: str | UUID | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Link a phone number to a user ID in the helpdesk system.
+        This allows the middleware to register a WhatsApp phone number
+        to an existing helpdesk user account.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/users/link-phone"
+        payload = {
+            "phone_number": phone_number,
+            "user_id": str(user_id),
+            "tenant_id": self._tenant_id(tenant_id),
+        }
+
+        try:
+            response = httpx.post(
+                url,
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error linking phone to user (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return None
+        except httpx.RequestError as e:
+            logger.error(
+                "Helpdesk API request error linking phone to user: %s", e
+            )
+            return None
+
+    # ── Ticket Creation ──────────────────────────────────
+
+    def create_ticket(
+        self,
+        tenant_id: str | UUID,
+        title: str,
+        description: str | None = None,
+        creator_id: str | UUID | None = None,
+        customer_id: str | UUID | None = None,
+        category: str | None = None,
+        priority: str | None = None,
+        channel: str | None = None,
+        phone_number: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Create a ticket in the helpdesk backend with full details.
+        This is the main endpoint for creating tickets from the middleware.
+        
+        Args:
+            tenant_id: The tenant UUID
+            title: Ticket title/subject
+            description: Ticket description
+            creator_id: The user ID who is creating the ticket (optional)
+            customer_id: The customer ID (optional)
+            category: Category name (optional)
+            priority: Priority name (optional)
+            channel: Channel name (optional)
+            phone_number: WhatsApp phone number (optional, for WhatsApp-originated tickets)
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/tickets/create"
+        payload = {
+            "tenant_id": self._tenant_id(tenant_id),
+            "title": title,
+            "description": description,
+            "creator_id": str(creator_id) if creator_id else None,
+            "customer_id": str(customer_id) if customer_id else None,
+            "category": category,
+            "priority": priority,
+            "channel": channel,
+            "phone_number": phone_number,
+        }
+        # Remove None values
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        try:
+            response = httpx.post(
+                url,
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error creating ticket (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return None
+        except httpx.RequestError as e:
+            logger.error(
+                "Helpdesk API request error creating ticket: %s", e
+            )
+            return None

@@ -520,14 +520,27 @@ class ConversationService:
             # Resolve helpdesk tenant ID for the API call
             helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
 
-            # Create ticket via the real helpdesk backend
+            # Get the registered user's helpdesk user ID (if available)
+            creator_id = None
+            if customer and customer.helpdesk_customer_id:
+                # Try to find the registered user for this phone number
+                registered_user = self.registered_users.get_by_phone_and_tenant(
+                    phone_number, tenant_id
+                )
+                if registered_user:
+                    creator_id = registered_user.helpdesk_user_id
+
+            # Create ticket via the real helpdesk backend with full details
             ticket_data = self.helpdesk_api.create_ticket(
                 tenant_id=helpdesk_tenant_id,
-                phone_number=phone_number,
-                subject=subject,
+                title=subject,
                 description=description,
+                creator_id=creator_id,
+                customer_id=customer.helpdesk_customer_id if customer and customer.helpdesk_customer_id else None,
                 category=category,
-                customer_name=customer.name if customer else None,
+                priority=None,  # Will use default
+                channel='WhatsApp',
+                phone_number=phone_number,
             )
 
             if ticket_data:

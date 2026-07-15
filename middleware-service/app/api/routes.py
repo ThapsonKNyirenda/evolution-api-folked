@@ -323,6 +323,100 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             ],
         }
 
+    # ── Phone-User Linking ────────────────────────────────
+
+    @router.post('/phone-user/link')
+    async def link_phone_to_user(
+        phone_number: str = Query(..., min_length=3, description='WhatsApp phone number'),
+        user_id: str = Query(..., description='Helpdesk user ID to link the phone number to'),
+        tenant_id: str = Query(..., description='Tenant UUID'),
+    ):
+        """
+        Link a WhatsApp phone number to a helpdesk user ID.
+        This allows the middleware to register a phone number to an existing helpdesk user account.
+        """
+        try:
+            user_uuid = uuid.UUID(user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail='Invalid user_id format')
+
+        try:
+            tenant_uuid = uuid.UUID(tenant_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail='Invalid tenant_id format')
+
+        result = helpdesk_api.link_phone_to_user(phone_number, user_uuid, tenant_uuid)
+        if not result:
+            raise HTTPException(status_code=502, detail='Failed to link phone to user in helpdesk')
+
+        return {
+            'message': 'Phone number linked to user successfully',
+            'phone_number': phone_number,
+            'user_id': user_id,
+            'result': result,
+        }
+
+    # ── Full Ticket Creation ────────────────────────────
+
+    @router.post('/tickets/create')
+    async def create_ticket_full(
+        tenant_id: str = Query(..., description='Tenant UUID'),
+        title: str = Query(..., min_length=1, max_length=500, description='Ticket title/subject'),
+        description: Optional[str] = Query(None, description='Ticket description'),
+        creator_id: Optional[str] = Query(None, description='Helpdesk user ID of the ticket creator'),
+        customer_id: Optional[str] = Query(None, description='Customer ID (optional)'),
+        category: Optional[str] = Query(None, description='Ticket category (Network, Billing, Technical Support, Other)'),
+        priority: Optional[str] = Query(None, description='Ticket priority (High, Medium, Low)'),
+        channel: Optional[str] = Query(None, description='Channel name (e.g., WhatsApp, Email, Portal)'),
+        phone_number: Optional[str] = Query(None, description='WhatsApp phone number (for WhatsApp-originated tickets)'),
+    ):
+        """
+        Create a ticket in the helpdesk backend with full details.
+        This endpoint allows the middleware to create tickets with explicit control over:
+        - creator_id: The helpdesk user who is creating the ticket
+        - customer_id: The customer associated with the ticket (optional)
+        - category, priority, channel: Ticket classification
+        - phone_number: For WhatsApp-originated tickets
+        """
+        try:
+            tenant_uuid = uuid.UUID(tenant_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail='Invalid tenant_id format')
+
+        creator_uuid = None
+        if creator_id:
+            try:
+                creator_uuid = uuid.UUID(creator_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail='Invalid creator_id format')
+
+        customer_uuid = None
+        if customer_id:
+            try:
+                customer_uuid = uuid.UUID(customer_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail='Invalid customer_id format')
+
+        result = helpdesk_api.create_ticket(
+            tenant_id=tenant_uuid,
+            title=title,
+            description=description,
+            creator_id=creator_uuid,
+            customer_id=customer_uuid,
+            category=category,
+            priority=priority,
+            channel=channel,
+            phone_number=phone_number,
+        )
+
+        if not result:
+            raise HTTPException(status_code=502, detail='Failed to create ticket in helpdesk')
+
+        return {
+            'message': 'Ticket created successfully',
+            'ticket': result,
+        }
+
     # ── Events ─────────────────────────────────────────────
 
     @router.post('/events/evolution')
