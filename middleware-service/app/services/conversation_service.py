@@ -248,7 +248,8 @@ class ConversationService:
         Returns user info if registered, None if not registered or on error.
         """
         try:
-            user_info = self.helpdesk_api.check_user_registration(phone_number, tenant_id)
+            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+            user_info = self.helpdesk_api.check_user_registration(phone_number, helpdesk_tenant_id)
             if not user_info:
                 return None
             
@@ -349,22 +350,28 @@ class ConversationService:
             if name:
                 self.customers.update(customer, name=name)
 
-        # Sync customer with main helpdesk system (best-effort)
-        self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
+        # Check if user is registered in helpdesk BEFORE syncing customer
+        # This prevents auto-creation of users in helpdesk for unregistered numbers
+        registration = self._check_user_registration(phone_number, tenant_id)
+        
+        # Only sync customer with helpdesk if user is registered
+        if registration:
+            # Sync customer with main helpdesk system (best-effort)
+            self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
 
-        # Update phone registry with latest helpdesk customer ID
-        helpdesk_id = customer.helpdesk_customer_id
-        if helpdesk_id:
-            try:
-                registry_entry = self.phone_registry.get_by_phone_and_tenant(
-                    phone_number, tenant_id
-                )
-                if registry_entry and not registry_entry.helpdesk_customer_id:
-                    self.phone_registry.update_helpdesk_id(
-                        registry_entry.id, helpdesk_id
+            # Update phone registry with latest helpdesk customer ID
+            helpdesk_id = customer.helpdesk_customer_id
+            if helpdesk_id:
+                try:
+                    registry_entry = self.phone_registry.get_by_phone_and_tenant(
+                        phone_number, tenant_id
                     )
-            except Exception as e:
-                logger.warning("Failed to update phone registry helpdesk ID: %s", e)
+                    if registry_entry and not registry_entry.helpdesk_customer_id:
+                        self.phone_registry.update_helpdesk_id(
+                            registry_entry.id, helpdesk_id
+                        )
+                except Exception as e:
+                    logger.warning("Failed to update phone registry helpdesk ID: %s", e)
 
         if self._is_session_stale(session):
             session.ticket_draft = None
