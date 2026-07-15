@@ -26,3 +26,4 @@ class Customer(Base):
 
     tenant = relationship('Tenant', back_populates='customers')
     tickets = relationship('Ticket', back_populates='customer')
+    phone_registries = relationship('PhoneRegistry', back_populates='customer', cascade='all, delete-orphan')

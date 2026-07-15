@@ -7,6 +7,8 @@ from app.models.whatsapp_session import WhatsappSession
 from app.repositories import (
     CustomerRepository,
     InstanceTenantRepository,
+    PhoneRegistryRepository,
+    TenantRepository,
     TicketMessageRepository,
     TicketRepository,
     WhatsappSessionRepository,
@@ -62,45 +64,39 @@ def _list_reply(text: str, title: str, button_text: str, sections: list[dict], f
 
 
 def _cancel_reply() -> dict:
-    return _build_main_menu()
+    """Return a text-based main menu when user cancels or requests menu."""
+    return _text_reply(
+        '📋 *Main Menu*\n\n'
+        'Reply with a number:\n'
+        '1️⃣ ✉️ Create Ticket\n'
+        '2️⃣ 🔍 Check Ticket\n'
+        '3️⃣ 💬 Speak to Agent\n\n'
+        'Or just describe your issue and we\'ll help!'
+    )
 
 
 def _build_main_menu() -> dict:
-    return _list_reply(
+    return _buttons_reply(
         text='Choose an option below to get started:',
-        title='\uD83D\uDC4B Welcome to Support!',
-        button_text='View Options',
-        sections=[
-            {
-                'title': 'Support Options',
-                'rows': [
-                    {'title': '\u2709\uFE0F Create Ticket', 'description': 'Report a new issue or request help', 'rowId': 'create_ticket'},
-                    {'title': '\uD83D\uDD0D Check Ticket', 'description': 'Check the status of an existing ticket', 'rowId': 'check_ticket'},
-                    {'title': '\uD83D\uDCAC Speak to Agent', 'description': 'Talk to a human support agent', 'rowId': 'speak_agent'},
-                ],
-            },
+        title='👋 Welcome to Support!',
+        buttons=[
+            {'type': 'reply', 'displayText': '✉️ Create Ticket', 'id': 'create_ticket'},
+            {'type': 'reply', 'displayText': '🔍 Check Ticket', 'id': 'check_ticket'},
+            {'type': 'reply', 'displayText': '💬 Speak to Agent', 'id': 'speak_agent'},
         ],
         footer='Select an option to continue',
     )
 
 
 def _build_category_list() -> dict:
-    return _list_reply(
-        text='Which category best describes your issue?',
-        title='\uD83D\uDCC1 Issue Category',
-        button_text='Select Category',
-        sections=[
-            {
-                'title': 'Categories',
-                'rows': [
-                    {'title': '\uD83C\uDF10 Network', 'description': 'Internet, connectivity, VPN issues', 'rowId': 'cat_network'},
-                    {'title': '\uD83D\uDCB3 Billing', 'description': 'Invoices, payments, subscriptions', 'rowId': 'cat_billing'},
-                    {'title': '\uD83D\uDD27 Technical Support', 'description': 'Software, hardware, system errors', 'rowId': 'cat_tech'},
-                    {'title': '\u2753 Other', 'description': 'Anything else not listed above', 'rowId': 'cat_other'},
-                ],
-            },
-        ],
-        footer='Pick the closest category',
+    return _text_reply(
+        '📁 *Select a Category*\n\n'
+        'Please reply with the number of your category:\n\n'
+        '1️⃣ 🌐 *Network* — Internet, connectivity, VPN\n'
+        '2️⃣ 💳 *Billing* — Invoices, payments, subscriptions\n'
+        '3️⃣ 🔧 *Technical Support* — Software, hardware, errors\n'
+        '4️⃣ ❓ *Other* — Anything not listed above\n\n'
+        'Send *0* at any time to return to the main menu.'
     )
 
 
@@ -149,7 +145,7 @@ def _build_ticket_status(ticket_data: dict) -> dict:
     created_str = created_at_raw[:10] if created_at_raw and len(created_at_raw) >= 10 else 'N/A'
 
     return _text_reply(
-        f'\uD83D\uDD0D *Ticket Details*\n\n'
+        f'🔍 *Ticket Details*\n\n'
         f'\u2022 *Number:* `{ticket_number}`\n'
         f'\u2022 *Status:* `{status}`\n'
         f'\u2022 *Subject:* {title}\n'
@@ -161,7 +157,7 @@ def _build_ticket_status(ticket_data: dict) -> dict:
 
 def _build_escalate_reply() -> dict:
     return _text_reply(
-        '\uD83D\uDCAC *Speak to Agent*\n\n'
+        '💬 *Speak to Agent*\n\n'
         'An agent will be with you shortly. In the meantime, please describe your issue '
         'and we will make sure the right team handles it.\n\n'
         'Send *0* to return to the main menu.'
@@ -180,7 +176,7 @@ def _build_subject_prompt() -> dict:
 
 def _build_description_prompt() -> dict:
     return _text_reply(
-        '\uD83D\uDCDD *Step 2: Description*\n\n'
+        '📝 *Step 2: Description*\n\n'
         'Now please describe your issue in *detail*:\n'
         '\u2022 What happened?\n'
         '\u2022 When did it start?\n'
@@ -198,7 +194,20 @@ class ConversationService:
         self.ticket_messages = TicketMessageRepository(db)
         self.sessions = WhatsappSessionRepository(db)
         self.instance_tenants = InstanceTenantRepository(db)
+        self.tenants = TenantRepository(db)
+        self.phone_registry = PhoneRegistryRepository(db)
         self.helpdesk_api = HelpdeskAPIClient()
+
+    def _resolve_helpdesk_tenant_id(self, local_tenant_id: uuid.UUID) -> str:
+        """
+        Translate a local middleware tenant ID to the corresponding
+        helpdesk tenant ID by looking up the helpdesk_tenant_id mapping.
+        Falls back to the local ID if no mapping exists.
+        """
+        tenant = self.tenants.get(local_tenant_id)
+        if tenant and tenant.helpdesk_tenant_id:
+            return str(tenant.helpdesk_tenant_id)
+        return str(local_tenant_id)
 
     def _is_session_stale(self, session: WhatsappSession) -> bool:
         from datetime import datetime, timedelta
@@ -211,10 +220,12 @@ class ConversationService:
         """
         Ensure the customer exists in the main helpdesk system and link them.
         Updates the local customer record with the helpdesk_customer_id.
+        Translates local tenant_id to the helpdesk tenant_id.
         """
         try:
+            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
             helpdesk_customer = self.helpdesk_api.get_or_create_customer(
-                tenant_id=tenant_id,
+                tenant_id=helpdesk_tenant_id,
                 phone_number=phone_number,
                 customer_name=push_name,
             )
@@ -231,6 +242,21 @@ class ConversationService:
                         if isinstance(helpdesk_id, str)
                         else helpdesk_id,
                     )
+                    # Also update the phone registry
+                    try:
+                        registry_entry = self.phone_registry.get_by_phone_and_tenant(
+                            phone_number, tenant_id
+                        )
+                        if registry_entry:
+                            self.phone_registry.update_helpdesk_id(
+                                registry_entry.id,
+                                uuid.UUID(helpdesk_id) if isinstance(helpdesk_id, str) else helpdesk_id,
+                            )
+                    except Exception as reg_err:
+                        logger.warning(
+                            "Failed to update phone registry helpdesk ID: %s",
+                            reg_err,
+                        )
         except Exception as e:
             logger.warning(
                 "Failed to sync customer with helpdesk: %s (phone=%s, continuing with local)",
@@ -248,6 +274,8 @@ class ConversationService:
 
         tenant_id = link.tenant_id
         customer = self.customers.get_or_create(phone_number, tenant_id)
+        # Register this phone number in the phone registry for quick lookup
+        self.phone_registry.get_or_create(phone_number, tenant_id, customer.id)
         session = self.sessions.get_or_create(phone_number, tenant_id)
         self.sessions.set_customer(session, customer.id)
 
@@ -258,6 +286,20 @@ class ConversationService:
 
         # Sync customer with main helpdesk system (best-effort)
         self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
+
+        # Update phone registry with latest helpdesk customer ID
+        helpdesk_id = customer.helpdesk_customer_id
+        if helpdesk_id:
+            try:
+                registry_entry = self.phone_registry.get_by_phone_and_tenant(
+                    phone_number, tenant_id
+                )
+                if registry_entry and not registry_entry.helpdesk_customer_id:
+                    self.phone_registry.update_helpdesk_id(
+                        registry_entry.id, helpdesk_id
+                    )
+            except Exception as e:
+                logger.warning("Failed to update phone registry helpdesk ID: %s", e)
 
         if self._is_session_stale(session):
             session.ticket_draft = None
@@ -298,6 +340,10 @@ class ConversationService:
     ) -> dict:
         choice = text.strip().lower()
 
+        if choice in ('0', 'menu', 'cancel'):
+            # Explicit menu request — show text menu
+            return _cancel_reply()
+
         if choice in ('1', 'create_ticket', 'create ticket'):
             session.ticket_draft = {}
             session.state = 'WAITING_SUBJECT'
@@ -306,7 +352,7 @@ class ConversationService:
         if choice in ('2', 'check_ticket', 'check ticket'):
             session.state = 'CHECKING_TICKET'
             return _text_reply(
-                '\uD83D\uDD0D *Check Ticket Status*\n\n'
+                '🔍 *Check Ticket Status*\n\n'
                 'Please enter your ticket number (e.g., `TKT-2026-00001`).\n\n'
                 'Send *0* to return to the main menu.'
             )
@@ -315,12 +361,8 @@ class ConversationService:
             session.state = 'MAIN_MENU'
             return _build_escalate_reply()
 
-        draft = session.ticket_draft
-        if not draft or not draft.get('subject'):
-            session.ticket_draft = {'subject': text[:200], 'description': text}
-            session.state = 'WAITING_CATEGORY'
-            return _build_category_list()
-
+        # For unrecognized text, show the interactive button menu
+        # This ensures new users see the welcome menu first
         return _build_main_menu()
 
     def _handle_subject(self, session: WhatsappSession, text: str) -> dict:
@@ -392,9 +434,12 @@ class ConversationService:
             customer = self.customers.get(customer_id)
             phone_number = customer.phone_number if customer else ''
 
+            # Resolve helpdesk tenant ID for the API call
+            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+
             # Create ticket via the real helpdesk backend
             ticket_data = self.helpdesk_api.create_ticket(
-                tenant_id=tenant_id,
+                tenant_id=helpdesk_tenant_id,
                 phone_number=phone_number,
                 subject=subject,
                 description=description,
@@ -457,7 +502,7 @@ class ConversationService:
             session.state = 'WAITING_SUBJECT'
             return _build_subject_prompt()
 
-        if normalized in ('confirm_cancel', '3', 'cancel'):
+        if normalized in ('confirm_cancel', '3', 'cancel', '0', 'menu'):
             session.ticket_draft = None
             session.state = 'MAIN_MENU'
             return _cancel_reply()
@@ -472,10 +517,13 @@ class ConversationService:
 
         ticket_number = text.strip().upper()
 
+        # Resolve helpdesk tenant ID for the API call
+        helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+
         # Look up ticket via the real helpdesk backend
         ticket_data = self.helpdesk_api.get_ticket_status(
             ticket_number=ticket_number,
-            tenant_id=tenant_id,
+            tenant_id=helpdesk_tenant_id,
         )
 
         if not ticket_data:

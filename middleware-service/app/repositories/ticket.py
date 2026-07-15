@@ -65,6 +65,13 @@ class TicketRepository:
             query = query.filter(Ticket.tenant_id == tenant_id)
         return query.first()
 
+    def get_by_helpdesk_id(self, helpdesk_ticket_id: uuid.UUID) -> Ticket | None:
+        return (
+            self.db.query(Ticket)
+            .filter(Ticket.helpdesk_ticket_id == helpdesk_ticket_id)
+            .first()
+        )
+
     def list_all(
         self,
         tenant_id: uuid.UUID | None = None,

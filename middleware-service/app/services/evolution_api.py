@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class EvolutionAPIService:
@@ -139,18 +142,124 @@ class EvolutionAPIService:
 
         return await self.send_text_message(instance_name, phone_number, reply.get('text', ''))
 
+    async def get_instances(self) -> list[dict[str, Any]]:
+        """
+        Fetch all instances from the Evolution API.
+        Returns a list of instance objects with their connection state.
+        """
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            response = await client.get(
+                f'{self.base_url}/instance/fetchInstances',
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            data = response.json()
+            # Evolution API may return instances in different structures
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return data.get("instances", [data])
+            return []
+
+    async def get_instance(self, instance_name: str) -> dict[str, Any] | None:
+        """
+        Fetch a single instance by name from the Evolution API.
+        """
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            try:
+                response = await client.get(
+                    f'{self.base_url}/instance/connectionState/{instance_name}',
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                if response.content:
+                    return response.json()
+                return None
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    return None
+                raise
+
+    async def create_instance(self, instance_name: str) -> dict[str, Any] | None:
+        """
+        Create a new instance in the Evolution API.
+        """
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            try:
+                response = await client.post(
+                    f'{self.base_url}/instance/create',
+                    json={
+                        "instanceName": instance_name,
+                        "integration": "WHATSAPP-BAILEYS",
+                    },
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                if response.content:
+                    return response.json()
+                return None
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Evolution API error creating instance (status %s): %s",
+                    e.response.status_code,
+                    e.response.text,
+                )
+                return None
+
+    async def delete_instance(self, instance_name: str) -> bool:
+        """
+        Delete an instance from the Evolution API.
+        """
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            try:
+                response = await client.delete(
+                    f'{self.base_url}/instance/delete/{instance_name}',
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                return True
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Evolution API error deleting instance (status %s): %s",
+                    e.response.status_code,
+                    e.response.text,
+                )
+                return False
+
+    async def restart_instance(self, instance_name: str) -> bool:
+        """
+        Restart an instance in the Evolution API.
+        """
+        async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
+            try:
+                response = await client.post(
+                    f'{self.base_url}/instance/restart/{instance_name}',
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                return True
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Evolution API error restarting instance (status %s): %s",
+                    e.response.status_code,
+                    e.response.text,
+                )
+                return False
+
     async def set_instance_webhook(self, instance_name: str, webhook_url: str) -> dict[str, Any] | None:
         async with httpx.AsyncClient(timeout=settings.evolution_api_timeout) as client:
             response = await client.post(
                 f'{self.base_url}/webhook/set/{instance_name}',
                 json={
-                    'url': webhook_url,
-                    'enabled': True,
-                    'events': [
-                        'MESSAGES_UPSERT',
-                        'CONNECTION_UPDATE',
-                        'QRCODE_UPDATED',
-                    ],
+                    'webhook': {
+                        'url': webhook_url,
+                        'enabled': True,
+                        'events': [
+                            'MESSAGES_UPSERT',
+                            'CONNECTION_UPDATE',
+                            'QRCODE_UPDATED',
+                        ],
+                    },
                 },
                 headers=self._headers(),
             )

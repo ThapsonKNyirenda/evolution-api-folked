@@ -364,6 +364,127 @@ class HelpdeskAPIClient:
             )
             return None
 
+    # ── Data Query Operations (pull data from helpdesk) ────
+
+    def list_tenants(
+        self,
+        page: int = 1,
+        per_page: int = 50,
+        include_deleted: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Fetch tenants from the main helpdesk system.
+        Returns paginated tenant data.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/tenants"
+        params = {
+            "page": page,
+            "per_page": per_page,
+            "include_deleted": str(include_deleted).lower(),
+        }
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error listing tenants (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return {"tenants": [], "total": 0, "page": page, "per_page": per_page}
+        except httpx.RequestError as e:
+            logger.error("Helpdesk API request error listing tenants: %s", e)
+            return {"tenants": [], "total": 0, "page": page, "per_page": per_page}
+
+    def list_customers(
+        self,
+        tenant_id: str | UUID | None = None,
+        page: int = 1,
+        per_page: int = 50,
+        include_deleted: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Fetch customers from the main helpdesk system.
+        Can be filtered by tenant_id.
+        Returns paginated customer data.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/customers/list"
+        params: dict[str, Any] = {
+            "page": page,
+            "per_page": per_page,
+            "include_deleted": str(include_deleted).lower(),
+        }
+        if tenant_id:
+            params["tenant_id"] = self._tenant_id(tenant_id)
+
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error listing customers (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return {"customers": [], "total": 0, "page": page, "per_page": per_page}
+        except httpx.RequestError as e:
+            logger.error("Helpdesk API request error listing customers: %s", e)
+            return {"customers": [], "total": 0, "page": page, "per_page": per_page}
+
+    def list_tickets(
+        self,
+        tenant_id: str | UUID | None = None,
+        customer_id: str | UUID | None = None,
+        page: int = 1,
+        per_page: int = 50,
+    ) -> dict[str, Any]:
+        """
+        Fetch tickets from the main helpdesk system.
+        Can be filtered by tenant_id and/or customer_id.
+        Returns paginated ticket data.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/tickets/list-all"
+        params: dict[str, Any] = {
+            "page": page,
+            "per_page": per_page,
+        }
+        if tenant_id:
+            params["tenant_id"] = self._tenant_id(tenant_id)
+        if customer_id:
+            params["customer_id"] = str(customer_id)
+
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error listing tickets (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return {"tickets": [], "total": 0, "page": page, "per_page": per_page}
+        except httpx.RequestError as e:
+            logger.error("Helpdesk API request error listing tickets: %s", e)
+            return {"tickets": [], "total": 0, "page": page, "per_page": per_page}
+
     # ── Health check ───────────────────────────────────────
 
     def health_check(self) -> bool:
