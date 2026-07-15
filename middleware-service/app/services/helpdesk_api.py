@@ -495,3 +495,45 @@ class HelpdeskAPIClient:
             return response.status_code == 200
         except Exception:
             return False
+
+    # ── User Registration Check ──────────────────────────
+
+    def check_user_registration(
+        self,
+        phone_number: str,
+        tenant_id: str | UUID | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Check if a phone number is registered to a user account in the helpdesk.
+        Returns user details if registered, or None if not registered or on error.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/users/check-registration"
+        params = {
+            "phone_number": phone_number,
+            "tenant_id": self._tenant_id(tenant_id),
+        }
+
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.info("No user registered for phone %s in helpdesk", phone_number)
+                return {"is_registered": False, "phone_number": phone_number}
+            logger.error(
+                "Helpdesk API error checking user registration (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return None
+        except httpx.RequestError as e:
+            logger.error(
+                "Helpdesk API request error checking user registration: %s", e
+            )
+            return None

@@ -5,10 +5,14 @@ from sqlalchemy.orm import Session
 
 from app.models.whatsapp_session import WhatsappSession
 from app.repositories import (
+    CommandLogRepository,
     CustomerRepository,
+    EventLogRepository,
     InstanceTenantRepository,
     PhoneRegistryRepository,
+    RegisteredUserRepository,
     TenantRepository,
+    TicketCommentRepository,
     TicketMessageRepository,
     TicketRepository,
     WhatsappSessionRepository,
@@ -219,6 +223,7 @@ class ConversationService:
         self.instance_tenants = InstanceTenantRepository(db)
         self.tenants = TenantRepository(db)
         self.phone_registry = PhoneRegistryRepository(db)
+        self.registered_users = RegisteredUserRepository(db)
         self.helpdesk_api = HelpdeskAPIClient()
 
     def _resolve_helpdesk_tenant_id(self, local_tenant_id: uuid.UUID) -> str:
@@ -236,6 +241,43 @@ class ConversationService:
         from datetime import datetime, timedelta
         cutoff = datetime.utcnow() - timedelta(minutes=SESSION_TIMEOUT_MINUTES)
         return session.last_activity < cutoff and session.state != 'MAIN_MENU'
+
+    def _check_user_registration(self, phone_number: str, tenant_id: uuid.UUID) -> dict | None:
+        """
+        Check if the phone number is registered to a user account in the helpdesk.
+        Returns user info if registered, None if not registered or on error.
+        """
+        try:
+            user_info = self.helpdesk_api.check_user_registration(phone_number, tenant_id)
+            if not user_info:
+                return None
+            
+            if not user_info.get("is_registered"):
+                return None
+            
+            # Sync the registered user to local database
+            helpdesk_user_id = user_info.get("user_id")
+            if helpdesk_user_id:
+                self.registered_users.get_or_create(
+                    phone_number=phone_number,
+                    tenant_id=tenant_id,
+                    helpdesk_user_id=uuid.UUID(helpdesk_user_id) if isinstance(helpdesk_user_id, str) else helpdesk_user_id,
+                    username=user_info.get("username"),
+                    email=user_info.get("email"),
+                    first_name=user_info.get("first_name"),
+                    last_name=user_info.get("last_name"),
+                    display_name=user_info.get("display_name"),
+                    is_active=user_info.get("is_active", True),
+                )
+            
+            return user_info
+        except Exception as e:
+            logger.warning(
+                "Failed to check user registration: %s (phone=%s)",
+                e,
+                phone_number,
+            )
+            return None
 
     def _sync_customer_with_helpdesk(
         self, phone_number: str, tenant_id: uuid.UUID, push_name: str | None = None
@@ -368,6 +410,17 @@ class ConversationService:
             return _cancel_reply()
 
         if choice in ('1', 'create_ticket', 'create ticket'):
+            # Check if user is registered in helpdesk before allowing ticket creation
+            customer = self.customers.get(customer_id)
+            if customer:
+                registration = self._check_user_registration(customer.phone_number, tenant_id)
+                if not registration:
+                    return _text_reply(
+                        '🔒 *Registration Required*\n\n'
+                        'Your phone number is not registered to a user account in the helpdesk system.\n\n'
+                        'Please contact your administrator to register your phone number before using the WhatsApp chatbot.\n\n'
+                        'Send *0* to return to the main menu.'
+                    )
             session.ticket_draft = {}
             session.state = 'WAITING_SUBJECT'
             return _build_subject_prompt()

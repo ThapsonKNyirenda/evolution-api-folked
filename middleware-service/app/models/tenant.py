@@ -22,3 +22,4 @@ class Tenant(Base):
     instance_links = relationship('InstanceTenant', back_populates='tenant')
     whatsapp_sessions = relationship('WhatsappSession', back_populates='tenant')
     phone_registries = relationship('PhoneRegistry', back_populates='tenant', cascade='all, delete-orphan')
+    registered_users = relationship('RegisteredUser', back_populates='tenant', cascade='all, delete-orphan')
