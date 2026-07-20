@@ -67,23 +67,23 @@ def _cancel_reply() -> dict:
 
 def _build_main_menu() -> dict:
     return _text_reply(
-        '👋 *Welcome to Support!*\n\n'
+        '**Welcome to Support!*\n\n'
         'Choose an option below:\n\n'
-        '1️⃣ *Create Ticket* - Report a new issue or request help\n'
-        '2️⃣ *Check Ticket* - Check the status of an existing ticket\n'
-        '3️⃣ *Speak to Agent* - Talk to a human support agent\n\n'
+        '1. *Create Ticket* - Report a new issue or request help\n'
+        '2. *Check Ticket* - Check the status of an existing ticket\n'
+        '3. *Speak to Agent* - Talk to a human support agent\n\n'
         'Reply with the number of your choice.'
     )
 
 
 def _build_category_list() -> dict:
     return _text_reply(
-        '📁 *Issue Category*\n\n'
+        '**Issue Category*\n\n'
         'Which category best describes your issue?\n\n'
-        '1️⃣ *Network* - Internet, connectivity, VPN issues\n'
-        '2️⃣ *Billing* - Invoices, payments, subscriptions\n'
-        '3️⃣ *Technical Support* - Software, hardware, system errors\n'
-        '4️⃣ *Other* - Anything else not listed above\n\n'
+        '1. *Network* - Internet, connectivity, VPN issues\n'
+        '2. *Billing* - Invoices, payments, subscriptions\n'
+        '3. *Technical Support* - Software, hardware, system errors\n'
+        '4. *Other* - Anything else not listed above\n\n'
         'Reply with the number of your choice.'
     )
 
@@ -100,22 +100,22 @@ def _build_confirm_buttons(draft: dict) -> dict:
     )
 
     return _text_reply(
-        f'✅ *Confirm Ticket*\n\n'
+        f'**Confirm Ticket*\n\n'
         f'Please review and confirm your ticket details:\n\n'
         f'{details}\n'
         f'Reply:\n'
-        f'1️⃣ *Submit* - Create the ticket\n'
-        f'2️⃣ *Edit Subject* - Change the subject\n'
-        f'3️⃣ *Cancel* - Discard and return to menu'
+        f'1. *Submit* - Create the ticket\n'
+        f'2. *Edit Subject* - Change the subject\n'
+        f'3. *Cancel* - Discard and return to menu'
     )
 
 
 def _build_ticket_created(ticket: Ticket) -> dict:
     return _text_reply(
-        f'✅ *Ticket Created Successfully!*\n\n'
-        f'• *Ticket Number:* `{ticket.ticket_number}`\n'
-        f'• *Status:* Open\n'
-        f'• *Category:* {ticket.category or "N/A"}\n\n'
+        f'**Ticket Created Successfully!*\n\n'
+        f' *Ticket Number:* `{ticket.ticket_number}`\n'
+        f' *Status:* Open\n'
+        f' *Category:* {ticket.category or "N/A"}\n\n'
         f'Our team will review your request and get back to you as soon as possible.\n\n'
         f'To return to the main menu at any time, send *0*.'
     )
@@ -123,19 +123,19 @@ def _build_ticket_created(ticket: Ticket) -> dict:
 
 def _build_ticket_status(ticket: Ticket) -> dict:
     return _text_reply(
-        f'🔍 *Ticket Details*\n\n'
-        f'• *Number:* `{ticket.ticket_number}`\n'
-        f'• *Status:* `{ticket.status.upper()}`\n'
-        f'• *Title:* {ticket.subject}\n'
-        f'• *Category:* {ticket.category or "N/A"}\n'
-        f'• *Created:* {ticket.created_at.strftime("%Y-%m-%d %H:%M")}\n\n'
+        f'**Ticket Details*\n\n'
+        f' *Number:* `{ticket.ticket_number}`\n'
+        f' *Status:* `{ticket.status.upper()}`\n'
+        f' *Title:* {ticket.subject}\n'
+        f' *Category:* {ticket.category or "N/A"}\n'
+        f' *Created:* {ticket.created_at.strftime("%Y-%m-%d %H:%M")}\n\n'
         f'Send *0* to return to the main menu.'
     )
 
 
 def _build_escalate_reply() -> dict:
     return _text_reply(
-        '💬 *Speak to Agent*\n\n'
+        '**Speak to Agent*\n\n'
         'An agent will be with you shortly. In the meantime, please describe your issue '
         'and we will make sure the right team handles it.\n\n'
         'Send *0* to return to the main menu.'
@@ -144,21 +144,21 @@ def _build_escalate_reply() -> dict:
 
 def _build_subject_prompt() -> dict:
     return _text_reply(
-        '✉️ *Step 1: Subject*\n\n'
+        '**Step 1: Subject*\n\n'
         'Please enter a *short subject* for your ticket (e.g., "Internet not working", '
         '"Payment issue", "Account access problem").\n\n'
-        'Keep it brief — one line is enough.\n\n'
+        'Keep it brief  one line is enough.\n\n'
         'Send *0* at any time to cancel and return to the main menu.'
     )
 
 
 def _build_description_prompt() -> dict:
     return _text_reply(
-        '📝 *Step 2: Description*\n\n'
+        '**Step 2: Description*\n\n'
         'Now please describe your issue in *detail*:\n'
-        '• What happened?\n'
-        '• When did it start?\n'
-        '• Any error messages?\n\n'
+        ' What happened?\n'
+        ' When did it start?\n'
+        ' Any error messages?\n\n'
         'The more detail you provide, the faster we can help you.\n\n'
         'Send *0* at any time to cancel and return to the main menu.'
     )
@@ -245,14 +245,14 @@ class ConversationService:
             if not tickets:
                 session.state = 'MAIN_MENU'
                 return _text_reply(
-                    '📭 *No Tickets Found*\n\n'
+                    ' *No Tickets Found*\n\n'
                     'You have no tickets yet. Send *1* to create a new ticket.\n\n'
                     '*0* to return to the main menu.'
                 )
 
-            lines = ['📋 *Your Tickets*\n']
+            lines = [' *Your Tickets*\n']
             for t in tickets:
-                lines.append(f'• `{t.ticket_number}` — *{t.subject[:50]}* ({t.status})')
+                lines.append(f' `{t.ticket_number}`  *{t.subject[:50]}* ({t.status})')
             lines.append('\nReply with a ticket number to see details, or *0* for menu.')
 
             session.state = 'CHECKING_TICKET'
