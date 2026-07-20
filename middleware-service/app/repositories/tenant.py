@@ -22,6 +22,9 @@ class TenantRepository:
     def get_by_name(self, name: str) -> Tenant | None:
         return self.db.query(Tenant).filter(Tenant.name == name).first()
 
+    def get_by_helpdesk_id(self, helpdesk_id: uuid.UUID) -> Tenant | None:
+        return self.db.query(Tenant).filter(Tenant.helpdesk_tenant_id == helpdesk_id).first()
+
     def list_all(self, limit: int = 50, offset: int = 0) -> list[Tenant]:
         return self.db.query(Tenant).order_by(Tenant.created_at.desc()).offset(offset).limit(limit).all()
 

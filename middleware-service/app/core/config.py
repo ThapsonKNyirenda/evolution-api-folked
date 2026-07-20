@@ -26,5 +26,18 @@ class Settings(BaseSettings):
     default_tenant_name: str = ''
     default_instance_name: str = ''
 
+    # Helpdesk backend API configuration
+    helpdesk_api_base_url: str = 'http://host.containers.internal:8000'
+    helpdesk_api_key: str = ''
+    helpdesk_api_timeout: int = 30
+    helpdesk_default_tenant_id: str = ''
+
+    # Shared authentication with main helpdesk system
+    # Uses the same SECRET_KEY and ALGORITHM as the main helpdesk for JWT token generation
+    secret_key: str = 'X0FZ0-_XAhFD9zCHZLZk6ePIvAL7WyyojU4L0Xm3-8Y'
+    algorithm: str = 'HS256'
+    helpdesk_jwt_enabled: bool = True
+    helpdesk_service_username: str = 'whatsapp-middleware'
+
 
 settings = Settings()

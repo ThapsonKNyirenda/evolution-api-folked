@@ -30,6 +30,7 @@ class TicketRepository:
         description: str | None = None,
         category: str | None = None,
         source: str = 'whatsapp',
+        helpdesk_ticket_id: uuid.UUID | None = None,
     ) -> Ticket:
         ticket = Ticket(
             ticket_number=self.next_ticket_number(),
@@ -39,6 +40,7 @@ class TicketRepository:
             description=description,
             category=category,
             source=source,
+            helpdesk_ticket_id=helpdesk_ticket_id,
         )
         self.db.add(ticket)
         self.db.commit()
@@ -64,6 +66,13 @@ class TicketRepository:
         if customer_id is not None:
             query = query.filter(Ticket.customer_id == customer_id)
         return query.first()
+
+    def get_by_helpdesk_id(self, helpdesk_ticket_id: uuid.UUID) -> Ticket | None:
+        return (
+            self.db.query(Ticket)
+            .filter(Ticket.helpdesk_ticket_id == helpdesk_ticket_id)
+            .first()
+        )
 
     def list_all(
         self,
