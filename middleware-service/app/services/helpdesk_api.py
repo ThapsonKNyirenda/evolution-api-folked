@@ -632,7 +632,13 @@ class HelpdeskAPIClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            logger.info(
+                "Ticket created in helpdesk backend: #%s (category=%s)",
+                result.get("ticket_number", "?"),
+                result.get("category", "?"),
+            )
+            return result
         except httpx.HTTPStatusError as e:
             logger.error(
                 "Helpdesk API error creating ticket (status %s): %s",

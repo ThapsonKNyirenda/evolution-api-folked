@@ -16,7 +16,7 @@ async def create_tenant(data: TenantCreate, db: Session = Depends(get_db)):
     existing = repo.get_by_name(data.name)
     if existing:
         raise HTTPException(status_code=409, detail='Tenant with this name already exists')
-    return repo.create(name=data.name)
+    return repo.create(name=data.name, helpdesk_tenant_id=data.helpdesk_tenant_id)
 
 
 @router.get('', response_model=list[TenantResponse])
@@ -46,7 +46,7 @@ async def update_tenant(tenant_id: uuid.UUID, data: TenantUpdate, db: Session = 
         existing = repo.get_by_name(data.name)
         if existing:
             raise HTTPException(status_code=409, detail='Tenant with this name already exists')
-    return repo.update(tenant, name=data.name)
+    return repo.update(tenant, name=data.name, helpdesk_tenant_id=data.helpdesk_tenant_id)
 
 
 @router.delete('/{tenant_id}', status_code=204)

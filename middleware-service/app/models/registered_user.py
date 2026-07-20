@@ -17,6 +17,7 @@ class RegisteredUser(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     phone_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
     helpdesk_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True, comment='Reference to the user UUID in the main helpdesk system')
+    helpdesk_tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True, comment='Reference to the tenant UUID in the main helpdesk system')
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

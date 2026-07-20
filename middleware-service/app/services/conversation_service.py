@@ -252,17 +252,26 @@ class ConversationService:
             user_info = self.helpdesk_api.check_user_registration(phone_number, helpdesk_tenant_id)
             if not user_info:
                 return None
-            
+
             if not user_info.get("is_registered"):
                 return None
-            
+
             # Sync the registered user to local database
             helpdesk_user_id = user_info.get("user_id")
             if helpdesk_user_id:
+                # Use the helpdesk tenant ID from the user's registration if available
+                user_helpdesk_tenant_id = user_info.get("tenant_id")
+                if user_helpdesk_tenant_id:
+                    try:
+                        user_helpdesk_tenant_id = uuid.UUID(str(user_helpdesk_tenant_id))
+                    except (ValueError, TypeError):
+                        user_helpdesk_tenant_id = None
+
                 self.registered_users.get_or_create(
                     phone_number=phone_number,
                     tenant_id=tenant_id,
                     helpdesk_user_id=uuid.UUID(helpdesk_user_id) if isinstance(helpdesk_user_id, str) else helpdesk_user_id,
+                    helpdesk_tenant_id=user_helpdesk_tenant_id,
                     username=user_info.get("username"),
                     email=user_info.get("email"),
                     first_name=user_info.get("first_name"),
@@ -270,7 +279,7 @@ class ConversationService:
                     display_name=user_info.get("display_name"),
                     is_active=user_info.get("is_active", True),
                 )
-            
+
             return user_info
         except Exception as e:
             logger.warning(
@@ -510,7 +519,9 @@ class ConversationService:
         draft['category'] = category
         session.ticket_draft = draft
         session.state = 'CONFIRM_TICKET'
-        return _build_confirm_buttons(draft)
+        # Use text-based confirmation instead of interactive buttons for
+        # better compatibility across WhatsApp clients
+        return _build_confirm_text(draft)
 
     def _handle_confirm(
         self, session: WhatsappSession, text: str, customer_id: uuid.UUID, tenant_id: uuid.UUID
@@ -531,18 +542,24 @@ class ConversationService:
             customer = self.customers.get(customer_id)
             phone_number = customer.phone_number if customer else ''
 
-            # Resolve helpdesk tenant ID for the API call
-            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-
-            # Get the registered user's helpdesk user ID (if available)
+            # Get the registered user's helpdesk info
             creator_id = None
+            registered_user = None
             if customer and customer.helpdesk_customer_id:
-                # Try to find the registered user for this phone number
                 registered_user = self.registered_users.get_by_phone_and_tenant(
                     phone_number, tenant_id
                 )
                 if registered_user:
                     creator_id = registered_user.helpdesk_user_id
+
+            # Use the registered user's helpdesk tenant ID if available,
+            # otherwise fall back to resolving from local tenant mapping.
+            # This ensures tickets are created in the correct helpdesk tenant
+            # (the tenant the user belongs to, not the middleware default).
+            if registered_user and registered_user.helpdesk_tenant_id:
+                helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
+            else:
+                helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
 
             # Create ticket via the real helpdesk backend with full details
             ticket_data = self.helpdesk_api.create_ticket(
@@ -627,8 +644,15 @@ class ConversationService:
 
         ticket_number = text.strip().upper()
 
-        # Resolve helpdesk tenant ID for the API call
+        # Use the registered user's helpdesk tenant ID if available
         helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+        customer = self.customers.get(customer_id)
+        if customer:
+            registered_user = self.registered_users.get_by_phone_and_tenant(
+                customer.phone_number, tenant_id
+            )
+            if registered_user and registered_user.helpdesk_tenant_id:
+                helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
 
         # Look up ticket via the real helpdesk backend
         ticket_data = self.helpdesk_api.get_ticket_status(
