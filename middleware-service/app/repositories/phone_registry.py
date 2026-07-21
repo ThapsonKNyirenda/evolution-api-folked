@@ -35,12 +35,14 @@ class PhoneRegistryRepository:
         self,
         phone_number: str,
         tenant_id: uuid.UUID,
-        customer_id: uuid.UUID,
+        customer_id: uuid.UUID | None = None,
         helpdesk_customer_id: uuid.UUID | None = None,
     ) -> PhoneRegistry:
         """
         Find an existing phone registry entry for the given phone + tenant,
         or create a new one. Updates last_seen_at on each access.
+        customer_id is optional — not every phone number belongs to a customer
+        (e.g., registered helpdesk agents who are not end customers).
         """
         entry = self.get_by_phone_and_tenant(phone_number, tenant_id)
         now = datetime.utcnow()

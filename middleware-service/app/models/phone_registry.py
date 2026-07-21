@@ -25,8 +25,8 @@ class PhoneRegistry(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     phone_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    customer_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey('customers.id', ondelete='CASCADE'), nullable=False, index=True
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('customers.id', ondelete='CASCADE'), nullable=True, index=True
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True

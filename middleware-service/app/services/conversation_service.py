@@ -348,24 +348,33 @@ class ConversationService:
             return _text_reply('This support line is not configured. Please contact the administrator.')
 
         tenant_id = link.tenant_id
-        customer = self.customers.get_or_create(phone_number, tenant_id)
-        # Register this phone number in the phone registry for quick lookup
-        self.phone_registry.get_or_create(phone_number, tenant_id, customer.id)
-        session = self.sessions.get_or_create(phone_number, tenant_id)
-        self.sessions.set_customer(session, customer.id)
 
-        if customer and not customer.name:
-            name = push_name or ''
-            if name:
-                self.customers.update(customer, name=name)
-
-        # Check if user is registered in helpdesk BEFORE syncing customer
-        # This prevents auto-creation of users in helpdesk for unregistered numbers
+        # Check if user is registered in helpdesk FIRST — this determines
+        # whether we treat them as a customer or a registered user (agent).
         registration = self._check_user_registration(phone_number, tenant_id)
-        
-        # Only sync customer with helpdesk if user is registered
+
+        customer = None
+        customer_id = None
+
         if registration:
-            # Sync customer with main helpdesk system (best-effort)
+            # Registered user (helpdesk agent) — do NOT force-create a Customer record.
+            # Just register the phone in the registry without a customer link.
+            self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
+            # Sync customer info with helpdesk (best-effort, may create helpdesk-side)
+            self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
+        else:
+            # Not registered — treat as a regular customer
+            customer = self.customers.get_or_create(phone_number, tenant_id)
+            customer_id = customer.id
+            self.phone_registry.get_or_create(phone_number, tenant_id, customer_id)
+
+            # Update push name if available
+            if customer and not customer.name:
+                name = push_name or ''
+                if name:
+                    self.customers.update(customer, name=name)
+
+            # Sync customer with helpdesk (best-effort)
             self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
 
             # Update phone registry with latest helpdesk customer ID
@@ -382,16 +391,20 @@ class ConversationService:
                 except Exception as e:
                     logger.warning("Failed to update phone registry helpdesk ID: %s", e)
 
+        session = self.sessions.get_or_create(phone_number, tenant_id)
+        if customer_id:
+            self.sessions.set_customer(session, customer_id)
+
         if self._is_session_stale(session):
             session.ticket_draft = None
             session.state = 'MAIN_MENU'
 
-        reply = self._handle_state(session, text.strip(), customer.id, tenant_id)
+        reply = self._handle_state(session, text.strip(), customer_id, tenant_id)
         self.sessions.update_state(session, session.state)
         return reply
 
     def _handle_state(
-        self, session: WhatsappSession, text: str, customer_id: uuid.UUID, tenant_id: uuid.UUID
+        self, session: WhatsappSession, text: str, customer_id: uuid.UUID | None, tenant_id: uuid.UUID
     ) -> dict:
         state = session.state
 
@@ -417,7 +430,7 @@ class ConversationService:
         return _build_main_menu()
 
     def _handle_main_menu(
-        self, session: WhatsappSession, text: str, customer_id: uuid.UUID, tenant_id: uuid.UUID
+        self, session: WhatsappSession, text: str, customer_id: uuid.UUID | None, tenant_id: uuid.UUID
     ) -> dict:
         choice = text.strip().lower()
 
@@ -427,19 +440,33 @@ class ConversationService:
 
         if choice in ('1', 'create_ticket', 'create ticket'):
             # Check if user is registered in helpdesk before allowing ticket creation
-            customer = self.customers.get(customer_id)
-            if customer:
-                registration = self._check_user_registration(customer.phone_number, tenant_id)
-                if not registration:
-                    return _text_reply(
-                        '🔒 *Registration Required*\n\n'
-                        'Your phone number is not registered to a user account in the helpdesk system.\n\n'
-                        'Please contact your administrator to register your phone number before using the WhatsApp chatbot.\n\n'
-                        'Send *0* to return to the main menu.'
-                    )
-            session.ticket_draft = {}
-            session.state = 'WAITING_SUBJECT'
-            return _build_subject_prompt()
+            if customer_id is not None:
+                customer = self.customers.get(customer_id)
+                if customer:
+                    registration = self._check_user_registration(customer.phone_number, tenant_id)
+                    if not registration:
+                        return _text_reply(
+                            '🔒 *Registration Required*\n\n'
+                            'Your phone number is not registered to a user account in the helpdesk system.\n\n'
+                            'Please contact your administrator to register your phone number before using the WhatsApp chatbot.\n\n'
+                            'Send *0* to return to the main menu.'
+                        )
+                session.ticket_draft = {}
+                session.state = 'WAITING_SUBJECT'
+                return _build_subject_prompt()
+            else:
+                # Registered agent without a customer record — use the session's
+                # phone number to check registration
+                registration = self._check_user_registration(session.phone_number, tenant_id)
+                if registration:
+                    session.ticket_draft = {}
+                    session.state = 'WAITING_SUBJECT'
+                    return _build_subject_prompt()
+                return _text_reply(
+                    '🔒 *Registration Required*\n\n'
+                    'Your phone number is not registered to a user account.\n\n'
+                    'Send *0* to return to the main menu.'
+                )
 
         if choice in ('2', 'check_ticket', 'check ticket', 'my tickets', 'my_tickets'):
             tickets = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=10)
@@ -524,7 +551,7 @@ class ConversationService:
         return _build_confirm_text(draft)
 
     def _handle_confirm(
-        self, session: WhatsappSession, text: str, customer_id: uuid.UUID, tenant_id: uuid.UUID
+        self, session: WhatsappSession, text: str, customer_id: uuid.UUID | None, tenant_id: uuid.UUID
     ) -> dict:
         normalized = text.strip().lower()
 
@@ -538,28 +565,26 @@ class ConversationService:
                 session.state = 'WAITING_SUBJECT'
                 return _build_subject_prompt()
 
-            # Get the customer's phone number for the helpdesk API call
-            customer = self.customers.get(customer_id)
-            phone_number = customer.phone_number if customer else ''
+            phone_number = session.phone_number
 
-            # Get the registered user's helpdesk info
+            # Get the registered user's helpdesk info for creator_id and tenant
             creator_id = None
-            registered_user = None
-            if customer and customer.helpdesk_customer_id:
-                registered_user = self.registered_users.get_by_phone_and_tenant(
-                    phone_number, tenant_id
-                )
-                if registered_user:
-                    creator_id = registered_user.helpdesk_user_id
+            registered_user = self.registered_users.get_by_phone_and_tenant(
+                phone_number, tenant_id
+            )
+            if registered_user:
+                creator_id = registered_user.helpdesk_user_id
 
             # Use the registered user's helpdesk tenant ID if available,
             # otherwise fall back to resolving from local tenant mapping.
-            # This ensures tickets are created in the correct helpdesk tenant
-            # (the tenant the user belongs to, not the middleware default).
             if registered_user and registered_user.helpdesk_tenant_id:
                 helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
             else:
                 helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+
+            # Resolve customer info for the ticket
+            customer = self.customers.get(customer_id) if customer_id else None
+            ticket_customer_id = customer.helpdesk_customer_id if customer and customer.helpdesk_customer_id else None
 
             # Create ticket via the real helpdesk backend with full details
             ticket_data = self.helpdesk_api.create_ticket(
@@ -567,7 +592,7 @@ class ConversationService:
                 title=subject,
                 description=description,
                 creator_id=creator_id,
-                customer_id=customer.helpdesk_customer_id if customer and customer.helpdesk_customer_id else None,
+                customer_id=ticket_customer_id,
                 category=category,
                 priority=None,  # Will use default
                 channel='WhatsApp',
@@ -575,9 +600,9 @@ class ConversationService:
             )
 
             if ticket_data:
-                # Store the helpdesk ticket reference locally
+                # Store the helpdesk ticket reference locally (only if we have a customer)
                 helpdesk_ticket_id = ticket_data.get("id")
-                if helpdesk_ticket_id:
+                if helpdesk_ticket_id and customer_id is not None:
                     try:
                         self.tickets.create(
                             tenant_id=tenant_id,
@@ -600,6 +625,18 @@ class ConversationService:
                 return _build_ticket_created(ticket_data)
 
             # Fallback: if helpdesk API fails, use local database
+            if customer_id is None:
+                # Cannot create local ticket without a customer reference
+                logger.warning("Cannot fall back to local ticket: no customer_id for agent %s", session.phone_number)
+                session.ticket_draft = None
+                session.state = 'MAIN_MENU'
+                return _text_reply(
+                    '❌ *Ticket Creation Failed*\n\n'
+                    'Unable to create ticket. The helpdesk system is currently unavailable.\n\n'
+                    'Please try again later or contact your administrator.\n\n'
+                    'Send *0* to return to the main menu.'
+                )
+
             logger.warning(
                 "Helpdesk API unavailable, falling back to local ticket creation"
             )
@@ -637,7 +674,7 @@ class ConversationService:
         draft = session.ticket_draft or {}
         return _build_confirm_text(draft)
 
-    def _handle_check_ticket(self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID) -> dict:
+    def _handle_check_ticket(self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None) -> dict:
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
@@ -646,10 +683,18 @@ class ConversationService:
 
         # Use the registered user's helpdesk tenant ID if available
         helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-        customer = self.customers.get(customer_id)
-        if customer:
+        if customer_id is not None:
+            customer = self.customers.get(customer_id)
+            if customer:
+                registered_user = self.registered_users.get_by_phone_and_tenant(
+                    customer.phone_number, tenant_id
+                )
+                if registered_user and registered_user.helpdesk_tenant_id:
+                    helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
+        else:
+            # For registered agents without customer record, look up by session phone
             registered_user = self.registered_users.get_by_phone_and_tenant(
-                customer.phone_number, tenant_id
+                session.phone_number, tenant_id
             )
             if registered_user and registered_user.helpdesk_tenant_id:
                 helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)

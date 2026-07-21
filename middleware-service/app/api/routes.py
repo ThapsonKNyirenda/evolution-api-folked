@@ -315,7 +315,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
                 {
                     'id': str(e.id),
                     'phone_number': e.phone_number,
-                    'customer_id': str(e.customer_id),
+                    'customer_id': str(e.customer_id) if e.customer_id else None,
                     'tenant_id': str(e.tenant_id),
                     'helpdesk_customer_id': str(e.helpdesk_customer_id) if e.helpdesk_customer_id else None,
                     'is_active': e.is_active,
