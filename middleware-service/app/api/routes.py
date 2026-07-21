@@ -13,6 +13,7 @@ from app.api.tenants import router as tenants_router
 from app.api.ticket_messages import router as ticket_messages_router
 from app.api.tickets import router as tickets_router
 from app.api.webhook import router as webhook_router
+from app.core import auth as auth_dep
 from app.core.config import settings
 from app.db.session import get_db
 from app.schemas.events import IncomingEvent, PublishMessage
@@ -34,12 +35,14 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
     evolution_api = EvolutionAPIService()
     helpdesk_api = HelpdeskAPIClient()
 
-    router.include_router(tenants_router)
-    router.include_router(customers_router)
-    router.include_router(tickets_router)
-    router.include_router(ticket_messages_router)
-    router.include_router(comments_router)
-    router.include_router(instances_router)
+    # Protected sub-routers (require valid helpdesk JWT)
+    router.include_router(tenants_router, dependencies=[Depends(auth_dep.require_helpdesk_token)])
+    router.include_router(customers_router, dependencies=[Depends(auth_dep.require_helpdesk_token)])
+    router.include_router(tickets_router, dependencies=[Depends(auth_dep.require_helpdesk_token)])
+    router.include_router(ticket_messages_router, dependencies=[Depends(auth_dep.require_helpdesk_token)])
+    router.include_router(comments_router, dependencies=[Depends(auth_dep.require_helpdesk_token)])
+    router.include_router(instances_router, dependencies=[Depends(auth_dep.require_admin_role)])
+    # Webhooks must remain public (called by Evolution API which cannot pass our JWT)
     router.include_router(webhook_router)
 
     @router.get('/health')
@@ -48,14 +51,14 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Evolution API Info ─────────────────────────────────
 
-    @router.get('/evolution/info')
+    @router.get('/evolution/info', dependencies=[Depends(auth_dep.require_admin_role)])
     async def evolution_info():
         try:
             return await evolution_api.get_information()
         except Exception as error:
             raise HTTPException(status_code=502, detail=f'Failed to fetch Evolution info: {error}') from error
 
-    @router.post('/evolution/rabbitmq/set/{instance_name}')
+    @router.post('/evolution/rabbitmq/set/{instance_name}', dependencies=[Depends(auth_dep.require_admin_role)])
     async def configure_evolution_rabbitmq(instance_name: str, config: RabbitMQInstanceConfig):
         try:
             response = await evolution_api.set_instance_rabbitmq(instance_name, config.model_dump())
@@ -65,7 +68,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Evolution API Instance Management ──────────────────
 
-    @router.get('/evolution/instances')
+    @router.get('/evolution/instances', dependencies=[Depends(auth_dep.require_admin_role)])
     async def list_evolution_instances():
         """List all instances from the Evolution API."""
         try:
@@ -74,7 +77,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
         except Exception as error:
             raise HTTPException(status_code=502, detail=f'Failed to fetch Evolution instances: {error}') from error
 
-    @router.get('/evolution/instances/{instance_name}')
+    @router.get('/evolution/instances/{instance_name}', dependencies=[Depends(auth_dep.require_admin_role)])
     async def get_evolution_instance(instance_name: str):
         """Get connection state for a specific Evolution API instance."""
         try:
@@ -87,7 +90,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
         except Exception as error:
             raise HTTPException(status_code=502, detail=f'Failed to fetch instance: {error}') from error
 
-    @router.post('/evolution/instances', status_code=201)
+    @router.post('/evolution/instances', status_code=201, dependencies=[Depends(auth_dep.require_admin_role)])
     async def create_evolution_instance(instance_name: str = Query(..., description='Name for the new instance')):
         """Create a new instance in the Evolution API."""
         try:
@@ -100,7 +103,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
         except Exception as error:
             raise HTTPException(status_code=502, detail=f'Failed to create instance: {error}') from error
 
-    @router.delete('/evolution/instances/{instance_name}')
+    @router.delete('/evolution/instances/{instance_name}', dependencies=[Depends(auth_dep.require_admin_role)])
     async def delete_evolution_instance(instance_name: str):
         """Delete an instance from the Evolution API."""
         success = await evolution_api.delete_instance(instance_name)
@@ -108,7 +111,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             raise HTTPException(status_code=500, detail=f'Failed to delete instance {instance_name}')
         return {'message': 'Instance deleted', 'instance': instance_name}
 
-    @router.post('/evolution/instances/{instance_name}/restart')
+    @router.post('/evolution/instances/{instance_name}/restart', dependencies=[Depends(auth_dep.require_admin_role)])
     async def restart_evolution_instance(instance_name: str):
         """Restart an instance in the Evolution API."""
         success = await evolution_api.restart_instance(instance_name)
@@ -118,7 +121,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Helpdesk Data Sync / Query Endpoints ───────────────
 
-    @router.get('/sync/tenants')
+    @router.get('/sync/tenants', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_tenants(
         page: int = Query(default=1, ge=1),
         per_page: int = Query(default=50, ge=1, le=200),
@@ -141,7 +144,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'per_page': per_page,
         }
 
-    @router.get('/sync/customers')
+    @router.get('/sync/customers', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_customers(
         tenant_id: Optional[str] = Query(None, description='Filter by tenant UUID'),
         page: int = Query(default=1, ge=1),
@@ -166,7 +169,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'per_page': per_page,
         }
 
-    @router.get('/sync/tickets')
+    @router.get('/sync/tickets', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_tickets(
         tenant_id: Optional[str] = Query(None, description='Filter by tenant UUID'),
         customer_id: Optional[str] = Query(None, description='Filter by customer UUID'),
@@ -191,7 +194,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'per_page': per_page,
         }
 
-    @router.get('/sync/health')
+    @router.get('/sync/health', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_health():
         """
         Check connectivity to both the helpdesk backend and Evolution API.
@@ -212,7 +215,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Sync Operations (pull data from helpdesk into local DB) ──
 
-    @router.post('/sync/run')
+    @router.post('/sync/run', dependencies=[Depends(auth_dep.require_admin_role)])
     async def run_full_sync(db: Session = Depends(get_db)):
         """
         Run a full sync: pull tenants, customers, and tickets from
@@ -225,7 +228,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'result': result,
         }
 
-    @router.post('/sync/tenants')
+    @router.post('/sync/tenants', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_tenants_to_db(db: Session = Depends(get_db)):
         """
         Pull tenants from the helpdesk system and upsert them into
@@ -238,7 +241,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'result': result,
         }
 
-    @router.post('/sync/customers')
+    @router.post('/sync/customers', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_customers_to_db(
         tenant_id: Optional[str] = Query(None, description='Local tenant UUID to sync customers for'),
         db: Session = Depends(get_db),
@@ -255,7 +258,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'result': result,
         }
 
-    @router.post('/sync/tickets')
+    @router.post('/sync/tickets', dependencies=[Depends(auth_dep.require_admin_role)])
     async def sync_tickets_to_db(
         tenant_id: Optional[str] = Query(None, description='Local tenant UUID to sync tickets for'),
         db: Session = Depends(get_db),
@@ -274,7 +277,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Phone Registry (phone → customer mapping) ─────────
 
-    @router.get('/phone-registry')
+    @router.get('/phone-registry', dependencies=[Depends(auth_dep.require_admin_role)])
     async def list_phone_registry(
         tenant_id: Optional[str] = Query(None, description='Filter by tenant UUID'),
         phone_number: Optional[str] = Query(None, description='Filter by phone number'),
@@ -325,7 +328,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Phone-User Linking ────────────────────────────────
 
-    @router.post('/phone-user/link')
+    @router.post('/phone-user/link', dependencies=[Depends(auth_dep.require_admin_role)])
     async def link_phone_to_user(
         phone_number: str = Query(..., min_length=3, description='WhatsApp phone number'),
         user_id: str = Query(..., description='Helpdesk user ID to link the phone number to'),
@@ -358,7 +361,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
 
     # ── Full Ticket Creation ────────────────────────────
 
-    @router.post('/tickets/create')
+    @router.post('/tickets/create', dependencies=[Depends(auth_dep.require_admin_role)])
     async def create_ticket_full(
         tenant_id: str = Query(..., description='Tenant UUID'),
         title: str = Query(..., min_length=1, max_length=500, description='Ticket title/subject'),
@@ -439,7 +442,7 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'ticket_result': summarize_ticket_result(ticket_result),
         }
 
-    @router.post('/events/helpdesk')
+    @router.post('/events/helpdesk', dependencies=[Depends(auth_dep.require_admin_role)])
     async def receive_helpdesk_event(data: IncomingEvent, db: Session = Depends(get_db)):
         repo = EventLogRepository(db)
         event = repo.create(source='helpdesk', event_type=data.event_type, payload=data.payload)
