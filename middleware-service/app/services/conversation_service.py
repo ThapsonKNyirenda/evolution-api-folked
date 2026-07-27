@@ -244,46 +244,32 @@ class ConversationService:
 
     def _check_user_registration(self, phone_number: str, tenant_id: uuid.UUID) -> dict | None:
         """
-        Check if the phone number is registered to a user account in the helpdesk.
-        Returns user info if registered, None if not registered or on error.
+        Check if the phone number is registered to a user account.
+        Queries the local registered_users table (populated via /phone-user/link)
+        instead of calling the helpdesk API, to keep phone-user mapping in the
+        middleware database only. The helpdesk users table is never modified.
+        Returns user info dict if registered, None if not registered.
         """
         try:
-            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-            user_info = self.helpdesk_api.check_user_registration(phone_number, helpdesk_tenant_id)
-            if not user_info:
+            registered_user = self.registered_users.get_by_phone_and_tenant(phone_number, tenant_id)
+            if not registered_user or not registered_user.is_active:
                 return None
 
-            if not user_info.get("is_registered"):
-                return None
-
-            # Sync the registered user to local database
-            helpdesk_user_id = user_info.get("user_id")
-            if helpdesk_user_id:
-                # Use the helpdesk tenant ID from the user's registration if available
-                user_helpdesk_tenant_id = user_info.get("tenant_id")
-                if user_helpdesk_tenant_id:
-                    try:
-                        user_helpdesk_tenant_id = uuid.UUID(str(user_helpdesk_tenant_id))
-                    except (ValueError, TypeError):
-                        user_helpdesk_tenant_id = None
-
-                self.registered_users.get_or_create(
-                    phone_number=phone_number,
-                    tenant_id=tenant_id,
-                    helpdesk_user_id=uuid.UUID(helpdesk_user_id) if isinstance(helpdesk_user_id, str) else helpdesk_user_id,
-                    helpdesk_tenant_id=user_helpdesk_tenant_id,
-                    username=user_info.get("username"),
-                    email=user_info.get("email"),
-                    first_name=user_info.get("first_name"),
-                    last_name=user_info.get("last_name"),
-                    display_name=user_info.get("display_name"),
-                    is_active=user_info.get("is_active", True),
-                )
-
-            return user_info
+            return {
+                "is_registered": True,
+                "user_id": str(registered_user.helpdesk_user_id),
+                "phone_number": registered_user.phone_number,
+                "username": registered_user.username,
+                "email": registered_user.email,
+                "first_name": registered_user.first_name,
+                "last_name": registered_user.last_name,
+                "display_name": registered_user.display_name,
+                "is_active": registered_user.is_active,
+                "tenant_id": str(registered_user.helpdesk_tenant_id or registered_user.tenant_id),
+            }
         except Exception as e:
             logger.warning(
-                "Failed to check user registration: %s (phone=%s)",
+                "Failed to check user registration locally: %s (phone=%s)",
                 e,
                 phone_number,
             )
@@ -359,9 +345,9 @@ class ConversationService:
         if registration:
             # Registered user (helpdesk agent) — do NOT force-create a Customer record.
             # Just register the phone in the registry without a customer link.
+            # Do NOT call _sync_customer_with_helpdesk — that would auto-create
+            # a customer in the helpdesk system, which we don't want for agents.
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
-            # Sync customer info with helpdesk (best-effort, may create helpdesk-side)
-            self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
         else:
             # Not registered — treat as a regular customer
             customer = self.customers.get_or_create(phone_number, tenant_id)

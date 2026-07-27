@@ -485,6 +485,45 @@ class HelpdeskAPIClient:
             logger.error("Helpdesk API request error listing tickets: %s", e)
             return {"tickets": [], "total": 0, "page": page, "per_page": per_page}
 
+    def list_users(
+        self,
+        tenant_id: str | UUID,
+        page: int = 1,
+        per_page: int = 50,
+        include_deleted: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Fetch internal users for a tenant from the main helpdesk system.
+        Used to refresh registered_users cached details.
+        Returns paginated user data.
+        """
+        url = f"{self.base_url}/api/v1/whatsapp/users/list"
+        params: dict[str, Any] = {
+            "tenant_id": self._tenant_id(tenant_id),
+            "page": page,
+            "per_page": per_page,
+            "include_deleted": str(include_deleted).lower(),
+        }
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Helpdesk API error listing users (status %s): %s",
+                e.response.status_code,
+                e.response.text,
+            )
+            return {"users": [], "total": 0, "page": page, "per_page": per_page}
+        except httpx.RequestError as e:
+            logger.error("Helpdesk API request error listing users: %s", e)
+            return {"users": [], "total": 0, "page": page, "per_page": per_page}
+
     # ── Health check ───────────────────────────────────────
 
     def health_check(self) -> bool:

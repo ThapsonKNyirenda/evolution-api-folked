@@ -275,6 +275,27 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
             'result': result,
         }
 
+    @router.post('/sync/registered-users', dependencies=[Depends(auth_dep.require_admin_role)])
+    async def sync_registered_users_to_db(
+        tenant_id: str = Query(..., description='Local tenant UUID to sync registered users for'),
+        db: Session = Depends(get_db),
+    ):
+        """
+        Pull internal users from the helpdesk system and update cached
+        details in the registered_users table.
+        Only updates users that were previously linked via /phone-user/link.
+        """
+        try:
+            tenant_uuid = uuid.UUID(tenant_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail='Invalid tenant_id format')
+        syncer = SyncService(db)
+        result = syncer.sync_registered_users(tenant_id=tenant_uuid)
+        return {
+            'message': 'Registered users sync completed',
+            'result': result,
+        }
+
     # ── Phone Registry (phone → customer mapping) ─────────
 
     @router.get('/phone-registry', dependencies=[Depends(auth_dep.require_admin_role)])
@@ -333,10 +354,18 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
         phone_number: str = Query(..., min_length=3, description='WhatsApp phone number'),
         user_id: str = Query(..., description='Helpdesk user ID to link the phone number to'),
         tenant_id: str = Query(..., description='Tenant UUID'),
+        username: Optional[str] = Query(None, description='Username of the helpdesk user'),
+        email: Optional[str] = Query(None, description='Email of the helpdesk user'),
+        first_name: Optional[str] = Query(None, description='First name of the helpdesk user'),
+        last_name: Optional[str] = Query(None, description='Last name of the helpdesk user'),
+        display_name: Optional[str] = Query(None, description='Display name of the helpdesk user'),
+        db: Session = Depends(get_db),
     ):
         """
         Link a WhatsApp phone number to a helpdesk user ID.
-        This allows the middleware to register a phone number to an existing helpdesk user account.
+        This allows the middleware to register a phone number to an existing helpdesk user account
+        even before the user sends a WhatsApp message. Creates local middleware records so the
+        phone-number-to-user mapping is available immediately.
         """
         try:
             user_uuid = uuid.UUID(user_id)
@@ -348,15 +377,60 @@ def get_router(rabbitmq: RabbitMQService) -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail='Invalid tenant_id format')
 
-        result = helpdesk_api.link_phone_to_user(phone_number, user_uuid, tenant_uuid)
-        if not result:
-            raise HTTPException(status_code=502, detail='Failed to link phone to user in helpdesk')
+        # Create middleware-local records so the link is available immediately.
+        # Phone-user mapping is stored ONLY in the middleware database —
+        # the helpdesk users table is never modified.
+        from app.repositories import TenantRepository
+        from app.repositories import RegisteredUserRepository
+
+        # Verify the tenant exists in middleware
+        tenant_repo = TenantRepository(db)
+        local_tenant = tenant_repo.get(tenant_uuid)
+        if not local_tenant:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tenant {tenant_id} not found in middleware database",
+            )
+
+        # Create RegisteredUser entry so the middleware knows this phone
+        # belongs to a helpdesk user
+        reg_user_repo = RegisteredUserRepository(db)
+        reg_user_repo.get_or_create(
+            phone_number=phone_number,
+            tenant_id=tenant_uuid,
+            helpdesk_user_id=user_uuid,
+            helpdesk_tenant_id=tenant_uuid,
+            username=username,
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            display_name=display_name,
+            is_active=True,
+        )
+
+        # Create PhoneRegistry entry WITHOUT a customer_id — this is a
+        # registered user/agent, not a customer. When they send their
+        # first WhatsApp message, process_message will resolve whether
+        # they also need a Customer record.
+        phone_reg_repo = PhoneRegistryRepository(db)
+        phone_reg_repo.get_or_create(
+            phone_number=phone_number,
+            tenant_id=tenant_uuid,
+            customer_id=None,  # Agents are not necessarily customers
+        )
+
+        logger.info(
+            "Created middleware records for phone-user link: phone=%s user=%s",
+            phone_number,
+            user_id,
+        )
+
+        db.commit()
 
         return {
             'message': 'Phone number linked to user successfully',
             'phone_number': phone_number,
             'user_id': user_id,
-            'result': result,
         }
 
     # ── Full Ticket Creation ────────────────────────────

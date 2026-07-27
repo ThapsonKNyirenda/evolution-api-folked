@@ -39,5 +39,9 @@ class Settings(BaseSettings):
     helpdesk_jwt_enabled: bool = True
     helpdesk_service_username: str = 'whatsapp-middleware'
 
+    # Periodic sync configuration
+    sync_interval_minutes: int = 15
+    """How often to run the background sync (tenants, customers, tickets, registered_users)."""
+
 
 settings = Settings()
