@@ -76,8 +76,9 @@ def _cancel_reply() -> dict:
         '📋 *Main Menu*\n\n'
         'Reply with a number:\n'
         '1️⃣ ✉️ Create Ticket\n'
-        '2️⃣ 🔍 Check Ticket\n'
-        '3️⃣ 💬 Speak to Agent\n\n'
+        '2️⃣ � My Tickets\n'
+        '3️⃣ 💬 Add Comment\n'
+        '4️⃣ 💬 Speak to Agent\n\n'
         'Or just describe your issue and we\'ll help!'
     )
 
@@ -88,7 +89,8 @@ def _build_main_menu() -> dict:
         title='👋 Welcome to Support!',
         buttons=[
             {'type': 'reply', 'displayText': '✉️ Create Ticket', 'id': 'create_ticket'},
-            {'type': 'reply', 'displayText': '🔍 Check Ticket', 'id': 'check_ticket'},
+            {'type': 'reply', 'displayText': '📋 My Tickets', 'id': 'my_tickets_all'},
+            {'type': 'reply', 'displayText': '💬 Add Comment', 'id': 'add_comment'},
             {'type': 'reply', 'displayText': '💬 Speak to Agent', 'id': 'speak_agent'},
         ],
         footer='Or type 0 to see the menu',
@@ -568,6 +570,12 @@ class ConversationService:
             return self._handle_my_tickets_filter(session, text, tenant_id, customer_id)
 
         # New states for Add Comment
+        if state == 'ADD_COMMENT_TICKET':
+            return self._handle_add_comment_ticket(session, text, tenant_id, customer_id)
+
+        if state == 'ADD_COMMENT_MESSAGE':
+            return self._handle_add_comment_message(session, text, tenant_id, customer_id)
+
         if state == 'WAITING_COMMENT':
             return self._handle_waiting_comment(session, text, tenant_id, customer_id)
 
@@ -616,41 +624,21 @@ class ConversationService:
                     'Send *0* to return to the main menu.'
                 )
 
-        if choice in ('2', 'check_ticket', 'check ticket', 'my tickets', 'my_tickets'):
-            # Check if user is registered (agent) or customer
-            if customer_id is not None:
-                # Customer - show their tickets
-                tickets = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=10)
-            else:
-                # Registered agent - show their tickets via helpdesk API
-                registration = self._check_user_registration(session.phone_number, tenant_id)
-                if registration:
-                    helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-                    result = self.helpdesk_api.get_my_tickets(
-                        user_id=registration["user_id"],
-                        tenant_id=helpdesk_tenant_id,
-                        limit=10,
-                    )
-                    tickets = result.get("tickets", [])
-                else:
-                    tickets = []
+        if choice in ('2', 'my tickets', 'my_tickets', 'my_tickets_all', 'list tickets', 'check ticket'):
+            # Show the My Tickets menu with sub-options (All, Filter by Status, Refresh)
+            session.state = 'MY_TICKETS_MENU'
+            return _build_my_tickets_menu()
 
-            if not tickets:
-                session.state = 'MAIN_MENU'
-                return _text_reply(
-                    '📭 *No Tickets Found*\n\n'
-                    'You have no tickets yet. Send *1* to create a new ticket.\n\n'
-                    '*0* to return to the main menu.'
-                )
+        if choice in ('3', 'add_comment', 'comment', 'add comment'):
+            # Start comment flow
+            return self._handle_add_comment_start(session, tenant_id, customer_id)
 
-            lines = ['📋 *Your Tickets*\n']
-            for t in tickets:
-                ticket_num = t.get('ticket_number', 'N/A')
-                title = t.get('title', 'N/A')[:50]
-                status = t.get('status', 'UNKNOWN')
-                lines.append(f' `{ticket_num}`  *{title}* ({status})')
-            lines.append('\nReply with a ticket number to see details, or *0* for menu.')
+        if choice in ('4', 'speak_agent', 'speak to agent', 'agent', '5'):
+            session.state = 'MAIN_MENU'
+            return _build_escalate_reply()
 
+        if choice in ('check_ticket', 'check'):
+            # Direct ticket number lookup
             session.state = 'CHECKING_TICKET'
             return _text_reply(
                 '🔍 *Check Ticket Status*\n\n'
@@ -658,17 +646,9 @@ class ConversationService:
                 'Send *0* to return to the main menu.'
             )
 
-        if choice in ('3', 'my_tickets_filtered', 'filter tickets', 'filter'):
+        if choice in ('filter', 'filter tickets'):
             # Show filtered tickets with status selection
             return self._handle_my_tickets_filtered(session, tenant_id, customer_id)
-
-        if choice in ('4', 'add_comment', 'comment', 'add comment'):
-            # Start comment flow
-            return self._handle_add_comment_start(session, tenant_id, customer_id)
-
-        if choice in ('5', 'speak_agent', 'speak to agent', 'agent'):
-            session.state = 'MAIN_MENU'
-            return _build_escalate_reply()
 
         # For unrecognized text, show the text menu instead of buttons
         # (buttons may not display properly if previous ones are still visible)
@@ -725,26 +705,39 @@ class ConversationService:
                 'Send *0* to return to the main menu.'
             )
 
-        # Fetch tickets with filter
-        if customer_id is not None:
-            # Customer - use local tickets
-            tickets = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=20)
-            if status_filter:
-                tickets = [t for t in tickets if t.status.lower() == status_filter.lower()]
+        # Fetch tickets with filter — use helpdesk API for all users
+        user_id = None
+        registration = self._check_user_registration(session.phone_number, tenant_id)
+        if registration:
+            user_id = registration["user_id"]
+
+        if user_id:
+            # Registered user — use helpdesk API with status filter
+            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+            result = self.helpdesk_api.get_my_tickets(
+                user_id=user_id,
+                tenant_id=helpdesk_tenant_id,
+                status_name=status_filter,
+                limit=20,
+            )
+            tickets = result.get("tickets", [])
+        elif customer_id is not None:
+            # Anonymous customer — use local DB with client-side filter
+            tickets_raw = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=20)
+            tickets = []
+            for t in tickets_raw:
+                t_status = t.status.upper() if t.status else "UNKNOWN"
+                if status_filter and t_status.lower() != status_filter.lower():
+                    continue
+                tickets.append({
+                    "ticket_number": t.ticket_number,
+                    "title": t.subject or t.title,
+                    "status": t_status,
+                    "priority": None,
+                    "category": t.category,
+                })
         else:
-            # Registered agent - use helpdesk API
-            registration = self._check_user_registration(session.phone_number, tenant_id)
-            if registration:
-                helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-                result = self.helpdesk_api.get_my_tickets(
-                    user_id=registration["user_id"],
-                    tenant_id=helpdesk_tenant_id,
-                    status_name=status_filter,
-                    limit=20,
-                )
-                tickets = result.get("tickets", [])
-            else:
-                tickets = []
+            tickets = []
 
         if not tickets:
             filter_text = f" ({status_filter})" if status_filter else ""
@@ -879,12 +872,13 @@ class ConversationService:
 
         normalized = text.strip().lower()
 
-        if normalized in ('1', 'all'):
+        # Handle both button IDs and text/number commands
+        if normalized in ('1', 'all', 'my_tickets_all', 'my tickets'):
             # Show all tickets
             session.state = 'MY_TICKETS_LIST'
-            return self._handle_my_tickets_list(session, text, tenant_id, customer_id)
+            return self._handle_my_tickets_list(session, 'all', tenant_id, customer_id)
 
-        if normalized in ('2', 'filter', 'filter tickets'):
+        if normalized in ('2', 'filter', 'filter tickets', 'my_tickets_filter'):
             # Show filter options
             session.state = 'MY_TICKETS_FILTER'
             return _text_reply(
@@ -899,8 +893,16 @@ class ConversationService:
                 'Send *0* to return to the main menu.'
             )
 
-        if normalized in ('3', 'refresh'):
-            # Refresh the list
+        if normalized in ('3', 'refresh', 'my_tickets_refresh'):
+            # Refresh the list (go to first page)
+            session.state = 'MY_TICKETS_LIST'
+            draft = dict(session.ticket_draft or {})
+            draft.pop('_ticket_page', None)
+            session.ticket_draft = draft
+            return self._handle_my_tickets_list(session, 'refresh', tenant_id, customer_id)
+
+        if normalized in ('next', 'n', 'prev', 'p', 'back', '<', '>') or normalized.startswith('page '):
+            # Pagination commands from list view — route directly to list handler
             session.state = 'MY_TICKETS_LIST'
             return self._handle_my_tickets_list(session, text, tenant_id, customer_id)
 
@@ -910,28 +912,74 @@ class ConversationService:
     def _handle_my_tickets_list(
         self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
     ) -> dict:
-        """Handle displaying the list of tickets."""
+        """Handle displaying the list of tickets with pagination.
+        
+        Supports pagination via "next", "prev", "page N" commands.
+        Uses the helpdesk API for both customers and registered users
+        to ensure consistent ticket visibility.
+        """
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
 
-        # Fetch tickets
-        if customer_id is not None:
-            # Customer - use local tickets
-            tickets = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=20)
+        # Determine current page from session state or text
+        per_page = 10
+        draft = dict(session.ticket_draft or {})
+        current_page = draft.get('_ticket_page', 1)
+
+        # Check if the user typed a page number or navigation command
+        normalized = text.strip().lower()
+        if normalized in ('next', 'n', '>'):
+            current_page = current_page + 1
+        elif normalized in ('prev', 'p', '<', 'back'):
+            current_page = max(1, current_page - 1)
+        elif normalized.startswith('page '):
+            try:
+                current_page = max(1, int(normalized.replace('page ', '').strip()))
+            except (ValueError, IndexError):
+                current_page = 1
         else:
-            # Registered agent - use helpdesk API
-            registration = self._check_user_registration(session.phone_number, tenant_id)
-            if registration:
-                helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-                result = self.helpdesk_api.get_my_tickets(
-                    user_id=registration["user_id"],
-                    tenant_id=helpdesk_tenant_id,
-                    limit=20,
-                )
-                tickets = result.get("tickets", [])
-            else:
-                tickets = []
+            current_page = 1
+
+        skip = (current_page - 1) * per_page
+
+        # Determine user_id and registration status
+        user_id = None
+        registration = self._check_user_registration(session.phone_number, tenant_id)
+        if registration:
+            user_id = registration["user_id"]
+
+        if user_id:
+            # Registered user (agent or customer contact) — use helpdesk API
+            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+            result = self.helpdesk_api.get_my_tickets(
+                user_id=user_id,
+                tenant_id=helpdesk_tenant_id,
+                skip=skip,
+                limit=per_page,
+            )
+            tickets = result.get("tickets", [])
+            total = result.get("total", 0)
+        elif customer_id is not None:
+            # Anonymous customer — use local DB as fallback
+            tickets_raw = self.tickets.list_all(
+                tenant_id=tenant_id, customer_id=customer_id, limit=per_page + 1, offset=skip
+            )
+            total = len(tickets_raw)
+            tickets = []
+            for t in tickets_raw[:per_page]:
+                tickets.append({
+                    "ticket_number": t.ticket_number,
+                    "title": t.subject or t.title,
+                    "status": t.status.upper() if t.status else "UNKNOWN",
+                    "priority": None,
+                    "category": t.category,
+                    "created_at": str(t.created_at) if t.created_at else None,
+                    "updated_at": str(t.updated_at) if t.updated_at else None,
+                })
+        else:
+            tickets = []
+            total = 0
 
         if not tickets:
             session.state = 'MAIN_MENU'
@@ -941,13 +989,32 @@ class ConversationService:
                 '*0* to return to the main menu.'
             )
 
+        # Save current page in session for pagination
+        draft = dict(session.ticket_draft or {})
+        draft['_ticket_page'] = current_page
+        session.ticket_draft = draft
+
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+
         lines = ['📋 *Your Tickets*\n']
-        for t in tickets:
+        for i, t in enumerate(tickets, 1):
             ticket_num = t.get('ticket_number', 'N/A')
             title = t.get('title', 'N/A')[:50]
             status = t.get('status', 'UNKNOWN')
-            lines.append(f' `{ticket_num}`  *{title}* ({status})')
-        lines.append('\nReply with a ticket number to see details, or *0* for menu.')
+            lines.append(f' {i}. `{ticket_num}`  *{title}* ({status})')
+
+        # Pagination info
+        lines.append('')
+        lines.append(f'📄 Page {current_page} of {total_pages} (Total: {total})')
+        lines.append('')
+        lines.append('Options:')
+        lines.append('• Reply with a *ticket number* to see details')
+        if current_page < total_pages:
+            lines.append('• Send *next* for next page')
+        if current_page > 1:
+            lines.append('• Send *prev* for previous page')
+        lines.append('• Send *filter* to filter by status')
+        lines.append('• Send *0* for main menu')
 
         session.state = 'CHECKING_TICKET'
         return _text_reply('\n'.join(lines))
