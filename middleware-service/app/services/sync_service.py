@@ -368,11 +368,15 @@ class SyncService:
 
     def sync_registered_users(self, tenant_id: uuid.UUID) -> dict[str, Any]:
         """
-        Pull internal users from the helpdesk system and update matching
-        registered_users entries with the latest cached details.
-        Only updates users that already exist in registered_users
-        (i.e., users that were linked via /phone-user/link).
-        Does NOT auto-create new registered_users entries.
+        Pull internal users from the helpdesk system and sync phone→user mappings.
+        
+        The helpdesk system is the source of truth for phone-to-user mappings.
+        Users with a phone_number set in the helpdesk are automatically
+        created/updated as RegisteredUser entries in the middleware.
+        Users whose phone_number was removed are deactivated.
+        
+        This replaces the old approach where the middleware's /phone-user/link
+        endpoint was responsible for creating the mappings.
         Returns stats about what was synced.
         """
         synced = []
@@ -395,62 +399,143 @@ class SyncService:
             )
             logger.info('Fetched %d users from helpdesk for tenant %s', len(users), tenant_id)
 
-            # Build lookup by helpdesk_user_id
-            helpdesk_users = {}
+            # Track which helpdesk user IDs we've processed
+            processed_helpdesk_ids = set()
+
             for u in users:
                 uid = u.get('id')
-                if uid:
-                    helpdesk_users[uid] = u
-
-            # Get all registered_users for this local tenant
-            local_registered = self.registered_users_repo.list_by_tenant(tenant_id, active_only=False)
-
-            for reg in local_registered:
-                h_user_id = str(reg.helpdesk_user_id)
-                h_user = helpdesk_users.get(h_user_id)
-                if not h_user:
-                    # User no longer exists in helpdesk or is now a wa_ user — deactivate
-                    if reg.is_active:
-                        self.registered_users_repo.deactivate(reg.id)
-                        logger.info('Deactivated registered_user %s - user not found in helpdesk', reg.phone_number)
-                        synced.append({'phone': reg.phone_number, 'action': 'deactivated'})
+                phone = u.get('phone_number', '') or ''
+                if not uid:
                     continue
 
-                # Update cached fields
+                processed_helpdesk_ids.add(uid)
+
+                if not phone.strip():
+                    # User has no phone number — deactivate any existing registered_user
+                    existing = self.registered_users_repo.get_by_helpdesk_user_id(
+                        uuid.UUID(uid), tenant_id
+                    )
+                    if existing and existing.is_active:
+                        self.registered_users_repo.deactivate(existing.id)
+                        logger.info(
+                            'Deactivated registered_user for %s - phone_number removed in helpdesk',
+                            u.get('email', '?')
+                        )
+                        synced.append({'phone': existing.phone_number, 'action': 'deactivated'})
+                    continue
+
+                # User has a phone number — create or update registered_user
+                helpdesk_user_id = uuid.UUID(uid)
+                phone_number = phone.strip()
+
+                # Build updates dict from helpdesk user data
                 updates = {}
                 for field in ['username', 'email', 'first_name', 'last_name', 'display_name']:
-                    h_value = h_user.get(field)
-                    current = getattr(reg, field, None)
-                    if h_value and h_value != current:
+                    h_value = u.get(field)
+                    if h_value:
                         updates[field] = h_value
 
                 # Sync is_active status
-                h_active = h_user.get('is_active', True)
-                if h_active != reg.is_active:
-                    updates['is_active'] = h_active
+                h_active = u.get('is_active', True)
+                updates['is_active'] = h_active
 
-                # Sync helpdesk_tenant_id if missing
-                h_tenant = h_user.get('tenant_id')
-                if h_tenant and not reg.helpdesk_tenant_id:
+                # Sync helpdesk_tenant_id
+                h_tenant = u.get('tenant_id')
+                helpdesk_tenant_id_val = None
+                if h_tenant:
                     try:
-                        updates['helpdesk_tenant_id'] = uuid.UUID(h_tenant)
+                        helpdesk_tenant_id_val = uuid.UUID(h_tenant)
                     except (ValueError, TypeError):
                         pass
 
-                if updates:
+                # Check if a registered_user already exists for this phone or helpdesk_user_id
+                existing_by_phone = self.registered_users_repo.get_by_phone_and_tenant(
+                    phone_number, tenant_id
+                )
+                existing_by_uid = self.registered_users_repo.get_by_helpdesk_user_id(
+                    helpdesk_user_id, tenant_id
+                )
+
+                existing = existing_by_phone or existing_by_uid
+
+                if existing:
+                    # If the phone number changed on the helpdesk user, we need to
+                    # handle the transition: deactivate old entry, create new one
+                    if existing_by_uid and existing_by_uid.phone_number != phone_number:
+                        # Phone number changed — deactivate old entry
+                        if existing_by_uid.is_active:
+                            self.registered_users_repo.deactivate(existing_by_uid.id)
+                            logger.info(
+                                'Phone changed for user %s: %s -> %s',
+                                u.get('email', '?'),
+                                existing_by_uid.phone_number,
+                                phone_number,
+                            )
+                        # Create new entry with updated phone
+                        self.registered_users_repo.get_or_create(
+                            phone_number=phone_number,
+                            tenant_id=tenant_id,
+                            helpdesk_user_id=helpdesk_user_id,
+                            helpdesk_tenant_id=helpdesk_tenant_id_val,
+                            **updates,
+                        )
+                        synced.append({
+                            'phone': phone_number,
+                            'action': 'created (phone changed)',
+                        })
+                        continue
+
+                    # Update existing entry
                     self.registered_users_repo.get_or_create(
-                        phone_number=reg.phone_number,
+                        phone_number=phone_number,
                         tenant_id=tenant_id,
-                        helpdesk_user_id=reg.helpdesk_user_id,
-                        helpdesk_tenant_id=reg.helpdesk_tenant_id,
+                        helpdesk_user_id=helpdesk_user_id,
+                        helpdesk_tenant_id=helpdesk_tenant_id_val,
                         **updates,
                     )
-                    synced.append({'phone': reg.phone_number, 'action': 'updated', 'fields': list(updates.keys())})
+                    synced.append({
+                        'phone': phone_number,
+                        'action': 'updated',
+                        'fields': list(updates.keys()),
+                    })
                 else:
-                    synced.append({'phone': reg.phone_number, 'action': 'no_change'})
+                    # Create new registered_user from helpdesk data
+                    self.registered_users_repo.get_or_create(
+                        phone_number=phone_number,
+                        tenant_id=tenant_id,
+                        helpdesk_user_id=helpdesk_user_id,
+                        helpdesk_tenant_id=helpdesk_tenant_id_val,
+                        **updates,
+                    )
+                    logger.info(
+                        'Created registered_user for %s with phone %s',
+                        u.get('email', '?'),
+                        phone_number,
+                    )
+                    synced.append({
+                        'phone': phone_number,
+                        'action': 'created',
+                    })
+
+            # Deactivate registered_users whose helpdesk user no longer exists
+            local_registered = self.registered_users_repo.list_by_tenant(tenant_id, active_only=False)
+            for reg in local_registered:
+                h_id_str = str(reg.helpdesk_user_id)
+                if h_id_str not in processed_helpdesk_ids:
+                    if reg.is_active:
+                        self.registered_users_repo.deactivate(reg.id)
+                        logger.info(
+                            'Deactivated registered_user %s - helpdesk user %s not found',
+                            reg.phone_number,
+                            h_id_str,
+                        )
+                        synced.append({
+                            'phone': reg.phone_number,
+                            'action': 'deactivated (user deleted)',
+                        })
 
         except Exception as e:
-            logger.error('Failed to sync registered_users: %s', e)
+            logger.error('Failed to sync registered_users: %s', e, exc_info=True)
             errors.append(f"Sync registered_users: {e}")
 
         return {'synced': len(synced), 'errors': errors}

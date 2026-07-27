@@ -17,6 +17,12 @@ class RegisteredUserRepository:
             RegisteredUser.tenant_id == tenant_id,
         ).first()
 
+    def get_by_helpdesk_user_id(self, helpdesk_user_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[RegisteredUser]:
+        return self.db.query(RegisteredUser).filter(
+            RegisteredUser.helpdesk_user_id == helpdesk_user_id,
+            RegisteredUser.tenant_id == tenant_id,
+        ).first()
+
     def get_or_create(self, phone_number: str, tenant_id: uuid.UUID, helpdesk_user_id: uuid.UUID, helpdesk_tenant_id: uuid.UUID | None = None, **kwargs) -> RegisteredUser:
         existing = self.get_by_phone_and_tenant(phone_number, tenant_id)
         if existing:

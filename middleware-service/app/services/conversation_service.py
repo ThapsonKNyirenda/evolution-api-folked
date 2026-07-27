@@ -245,28 +245,64 @@ class ConversationService:
     def _check_user_registration(self, phone_number: str, tenant_id: uuid.UUID) -> dict | None:
         """
         Check if the phone number is registered to a user account.
-        Queries the local registered_users table (populated via /phone-user/link)
-        instead of calling the helpdesk API, to keep phone-user mapping in the
-        middleware database only. The helpdesk users table is never modified.
+        
+        First checks the local registered_users table (populated by sync from helpdesk).
+        If not found locally, falls back to querying the helpdesk API directly.
+        This ensures that recently assigned phone numbers work immediately
+        without waiting for the next sync cycle.
+        
         Returns user info dict if registered, None if not registered.
         """
         try:
             registered_user = self.registered_users.get_by_phone_and_tenant(phone_number, tenant_id)
-            if not registered_user or not registered_user.is_active:
-                return None
+            if registered_user and registered_user.is_active:
+                return {
+                    "is_registered": True,
+                    "user_id": str(registered_user.helpdesk_user_id),
+                    "phone_number": registered_user.phone_number,
+                    "username": registered_user.username,
+                    "email": registered_user.email,
+                    "first_name": registered_user.first_name,
+                    "last_name": registered_user.last_name,
+                    "display_name": registered_user.display_name,
+                    "is_active": registered_user.is_active,
+                    "tenant_id": str(registered_user.helpdesk_tenant_id or registered_user.tenant_id),
+                }
 
-            return {
-                "is_registered": True,
-                "user_id": str(registered_user.helpdesk_user_id),
-                "phone_number": registered_user.phone_number,
-                "username": registered_user.username,
-                "email": registered_user.email,
-                "first_name": registered_user.first_name,
-                "last_name": registered_user.last_name,
-                "display_name": registered_user.display_name,
-                "is_active": registered_user.is_active,
-                "tenant_id": str(registered_user.helpdesk_tenant_id or registered_user.tenant_id),
-            }
+            # Fallback: check helpdesk API directly (in case sync hasn't run yet)
+            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+            helpdesk_result = self.helpdesk_api.check_user_registration(
+                phone_number=phone_number,
+                tenant_id=helpdesk_tenant_id,
+            )
+
+            if helpdesk_result and helpdesk_result.get("is_registered"):
+                # Found in helpdesk — create local registered_user entry for future lookups
+                try:
+                    self.registered_users.get_or_create(
+                        phone_number=phone_number,
+                        tenant_id=tenant_id,
+                        helpdesk_user_id=uuid.UUID(helpdesk_result["user_id"]),
+                        helpdesk_tenant_id=uuid.UUID(helpdesk_result.get("tenant_id", str(tenant_id))),
+                        username=helpdesk_result.get("username"),
+                        email=helpdesk_result.get("email"),
+                        first_name=helpdesk_result.get("first_name"),
+                        last_name=helpdesk_result.get("last_name"),
+                        display_name=helpdesk_result.get("display_name"),
+                        is_active=helpdesk_result.get("is_active", True),
+                    )
+                    logger.info(
+                        "Auto-created registered_user from helpdesk fallback: phone=%s",
+                        phone_number,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to create local registered_user from helpdesk fallback: %s", e
+                    )
+
+                return helpdesk_result
+
+            return None
         except Exception as e:
             logger.warning(
                 "Failed to check user registration locally: %s (phone=%s)",
