@@ -632,6 +632,7 @@ class HelpdeskAPIClient:
         priority: str | None = None,
         channel: str | None = None,
         phone_number: str | None = None,
+        cc_emails: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """
         Create a ticket in the helpdesk backend with full details.
@@ -647,6 +648,7 @@ class HelpdeskAPIClient:
             priority: Priority name (optional)
             channel: Channel name (optional)
             phone_number: WhatsApp phone number (optional, for WhatsApp-originated tickets)
+            cc_emails: CC email addresses (optional)
         """
         url = f"{self.base_url}/api/v1/whatsapp/tickets/create"
         payload = {
@@ -659,6 +661,7 @@ class HelpdeskAPIClient:
             "priority": priority,
             "channel": channel,
             "phone_number": phone_number,
+            "cc_emails": cc_emails if cc_emails else None,
         }
         # Remove None values
         payload = {k: v for k, v in payload.items() if v is not None}

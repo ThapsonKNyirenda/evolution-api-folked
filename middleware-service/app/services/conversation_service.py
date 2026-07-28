@@ -1,4 +1,5 @@
 import uuid
+import re
 import logging
 
 from sqlalchemy.orm import Session
@@ -76,9 +77,9 @@ def _cancel_reply() -> dict:
         '📋 *Main Menu*\n\n'
         'Reply with a number:\n'
         '1️⃣ ✉️ Create Ticket\n'
-        '2️⃣ � My Tickets\n'
+        '2️⃣ 🎫 View Tickets\n'
         '3️⃣ 💬 Add Comment\n'
-        '4️⃣ 💬 Speak to Agent\n\n'
+        '4️⃣ 🎧 Speak to Agent\n\n'
         'Or just describe your issue and we\'ll help!'
     )
 
@@ -89,9 +90,9 @@ def _build_main_menu() -> dict:
         title='👋 Welcome to Support!',
         buttons=[
             {'type': 'reply', 'displayText': '✉️ Create Ticket', 'id': 'create_ticket'},
-            {'type': 'reply', 'displayText': '📋 My Tickets', 'id': 'my_tickets_all'},
+            {'type': 'reply', 'displayText': '🎫 View Tickets', 'id': 'my_tickets_all'},
             {'type': 'reply', 'displayText': '💬 Add Comment', 'id': 'add_comment'},
-            {'type': 'reply', 'displayText': '💬 Speak to Agent', 'id': 'speak_agent'},
+            {'type': 'reply', 'displayText': '🎧 Speak to Agent', 'id': 'speak_agent'},
         ],
         footer='Or type 0 to see the menu',
     )
@@ -109,16 +110,41 @@ def _build_category_list() -> dict:
     )
 
 
+def _build_cc_prompt() -> dict:
+    """Ask for optional CC email addresses before confirming the ticket."""
+    return _text_reply(
+        '📧 *Optional: CC Email Addresses*\n\n'
+        'Would you like to add email addresses to receive a copy of this ticket?\n\n'
+        'Enter email addresses separated by commas, e.g.:\n'
+        '`manager@example.com, team@example.com`\n\n'
+        'Or send *skip* (or *0*) to continue without CC emails.'
+    )
+
+
+def _build_cc_prompt() -> dict:
+    """Ask for optional CC email addresses."""
+    return _text_reply(
+        '📧 *Optional: CC Email Addresses*\n\n'
+        'Would you like to add email addresses to be copied on this ticket?\n\n'
+        'Enter email addresses separated by commas, e.g.:\n'
+        '`manager@example.com, supervisor@example.com`\n\n'
+        'Or send *skip* (or *0*) to continue without CC.'
+    )
+
+
 def _build_confirm_buttons(draft: dict) -> dict:
     subject = draft.get('subject', 'N/A')[:100]
     description = draft.get('description', 'N/A')
     category = draft.get('category', 'N/A')
+    cc_emails = draft.get('cc_emails', [])
 
     details = (
         f'\u2022 *Subject:* {subject}\n'
         f'\u2022 *Description:* {description}\n'
         f'\u2022 *Category:* {category}\n'
     )
+    if cc_emails:
+        details += f'\u2022 *CC:* {", ".join(cc_emails)}\n'
 
     return _buttons_reply(
         text=f'Please review and confirm your ticket details:\n\n{details}',
@@ -137,12 +163,15 @@ def _build_confirm_text(draft: dict) -> dict:
     subject = draft.get('subject', 'N/A')[:100]
     description = draft.get('description', 'N/A')
     category = draft.get('category', 'N/A')
+    cc_emails = draft.get('cc_emails', [])
 
     details = (
         f'\u2022 *Subject:* {subject}\n'
         f'\u2022 *Description:* {description}\n'
         f'\u2022 *Category:* {category}\n'
     )
+    if cc_emails:
+        details += f'\u2022 *CC:* {", ".join(cc_emails)}\n'
 
     return _text_reply(
         f'\u2705 *Confirm Ticket*\n\n'
@@ -243,10 +272,10 @@ def _build_my_tickets_list(tickets: list[dict], page: int, total: int, per_page:
 
 
 def _build_my_tickets_menu() -> dict:
-    """Build the my tickets menu with filter options."""
+    """Build the View Tickets menu with filter options."""
     return _buttons_reply(
-        text='📋 *My Tickets*\n\nChoose an option:',
-        title='My Tickets',
+        text='🎫 *View Tickets*\n\nChoose an option:',
+        title='View Tickets',
         buttons=[
             {'type': 'reply', 'displayText': '📋 All Tickets', 'id': 'my_tickets_all'},
             {'type': 'reply', 'displayText': '🔍 Filter by Status', 'id': 'my_tickets_filter'},
@@ -553,6 +582,9 @@ class ConversationService:
         if state == 'WAITING_CATEGORY':
             return self._handle_category(session, text)
 
+        if state == 'WAITING_CC_EMAILS':
+            return self._handle_cc_emails(session, text, customer_id, tenant_id)
+
         if state == 'CONFIRM_TICKET':
             return self._handle_confirm(session, text, customer_id, tenant_id)
 
@@ -624,7 +656,7 @@ class ConversationService:
                     'Send *0* to return to the main menu.'
                 )
 
-        if choice in ('2', 'my tickets', 'my_tickets', 'my_tickets_all', 'list tickets', 'check ticket'):
+        if choice in ('2', 'my tickets', 'my_tickets', 'my_tickets_all', 'view tickets', 'view_tickets', 'list tickets', 'check ticket'):
             # Show the My Tickets menu with sub-options (All, Filter by Status, Refresh)
             session.state = 'MY_TICKETS_MENU'
             return _build_my_tickets_menu()
@@ -674,7 +706,11 @@ class ConversationService:
     def _handle_my_tickets_filter(
         self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
     ) -> dict:
-        """Handle status filter selection for my tickets."""
+        """Handle status filter selection for my tickets.
+        
+        Saves the chosen filter in the session and redirects to the
+        paginated ticket list handler.
+        """
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
@@ -705,60 +741,14 @@ class ConversationService:
                 'Send *0* to return to the main menu.'
             )
 
-        # Fetch tickets with filter — use helpdesk API for all users
-        user_id = None
-        registration = self._check_user_registration(session.phone_number, tenant_id)
-        if registration:
-            user_id = registration["user_id"]
+        # Store filter in session and redirect to paginated list
+        draft = dict(session.ticket_draft or {})
+        draft['_ticket_status_filter'] = status_filter
+        draft['_ticket_page'] = 1
+        session.ticket_draft = draft
 
-        if user_id:
-            # Registered user — use helpdesk API with status filter
-            helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-            result = self.helpdesk_api.get_my_tickets(
-                user_id=user_id,
-                tenant_id=helpdesk_tenant_id,
-                status_name=status_filter,
-                limit=20,
-            )
-            tickets = result.get("tickets", [])
-        elif customer_id is not None:
-            # Anonymous customer — use local DB with client-side filter
-            tickets_raw = self.tickets.list_all(tenant_id=tenant_id, customer_id=customer_id, limit=20)
-            tickets = []
-            for t in tickets_raw:
-                t_status = t.status.upper() if t.status else "UNKNOWN"
-                if status_filter and t_status.lower() != status_filter.lower():
-                    continue
-                tickets.append({
-                    "ticket_number": t.ticket_number,
-                    "title": t.subject or t.title,
-                    "status": t_status,
-                    "priority": None,
-                    "category": t.category,
-                })
-        else:
-            tickets = []
-
-        if not tickets:
-            filter_text = f" ({status_filter})" if status_filter else ""
-            session.state = 'MAIN_MENU'
-            return _text_reply(
-                f'📭 *No Tickets Found{filter_text}*\n\n'
-                'No tickets match your filter.\n\n'
-                'Send *0* to return to the main menu.'
-            )
-
-        filter_text = f" ({status_filter})" if status_filter else ""
-        lines = [f'📋 *Your Tickets{filter_text}*\n']
-        for t in tickets:
-            ticket_num = t.get('ticket_number', 'N/A')
-            title = t.get('title', 'N/A')[:50]
-            status = t.get('status', 'UNKNOWN')
-            lines.append(f' `{ticket_num}`  *{title}* ({status})')
-        lines.append('\nReply with a ticket number to see details, or *0* for menu.')
-
-        session.state = 'CHECKING_TICKET'
-        return _text_reply('\n'.join(lines))
+        session.state = 'MY_TICKETS_LIST'
+        return self._handle_my_tickets_list(session, 'all', tenant_id, customer_id)
 
     # ── Add Comment Flow ──────────────────────────────────
 
@@ -873,7 +863,7 @@ class ConversationService:
         normalized = text.strip().lower()
 
         # Handle both button IDs and text/number commands
-        if normalized in ('1', 'all', 'my_tickets_all', 'my tickets'):
+        if normalized in ('1', 'all', 'my_tickets_all', 'my tickets', 'view tickets', 'view_tickets'):
             # Show all tickets
             session.state = 'MY_TICKETS_LIST'
             return self._handle_my_tickets_list(session, 'all', tenant_id, customer_id)
@@ -894,10 +884,11 @@ class ConversationService:
             )
 
         if normalized in ('3', 'refresh', 'my_tickets_refresh'):
-            # Refresh the list (go to first page)
+            # Refresh the list (clear filter, go to first page)
             session.state = 'MY_TICKETS_LIST'
             draft = dict(session.ticket_draft or {})
             draft.pop('_ticket_page', None)
+            draft.pop('_ticket_status_filter', None)
             session.ticket_draft = draft
             return self._handle_my_tickets_list(session, 'refresh', tenant_id, customer_id)
 
@@ -915,21 +906,53 @@ class ConversationService:
         """Handle displaying the list of tickets with pagination.
         
         Supports pagination via "next", "prev", "page N" commands.
-        Uses the helpdesk API for both customers and registered users
-        to ensure consistent ticket visibility.
+        Users can also type a ticket number to view details, or
+        "filter" to change the status filter.
+        
+        The session stays in MY_TICKETS_LIST state so that subsequent
+        pagination commands continue to be routed here.
         """
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
 
-        # Determine current page from session state or text
+        normalized = text.strip().lower()
+
+        # ── Filter command from list view ──
+        if normalized in ('filter', 'filter tickets', 'my_tickets_filter', '2'):
+            session.state = 'MY_TICKETS_FILTER'
+            return _text_reply(
+                '🔍 *Filter Tickets by Status*\n\n'
+                'Reply with the number of the status you want to filter by:\n\n'
+                '1️⃣ All\n'
+                '2️⃣ Open\n'
+                '3️⃣ In Progress\n'
+                '4️⃣ Resolved\n'
+                '5️⃣ Closed\n'
+                '6️⃣ On Hold\n\n'
+                'Send *0* to return to the main menu.'
+            )
+
+        # ── Ticket number lookup ──
+        # If the text looks like a ticket number (e.g. TKT-2026-00001, INC-...),
+        # route directly to ticket detail lookup.
+        if self._looks_like_ticket_number(normalized):
+            return self._handle_ticket_lookup(session, text, tenant_id, customer_id)
+
+        # ── Pagination ──
         per_page = 10
         draft = dict(session.ticket_draft or {})
         current_page = draft.get('_ticket_page', 1)
+        status_filter = draft.get('_ticket_status_filter')  # stored by _handle_my_tickets_filter
 
-        # Check if the user typed a page number or navigation command
-        normalized = text.strip().lower()
-        if normalized in ('next', 'n', '>'):
+        if normalized in ('refresh', 'my_tickets_refresh'):
+            # Clear filter and reset to page 1
+            draft.pop('_ticket_page', None)
+            draft.pop('_ticket_status_filter', None)
+            session.ticket_draft = draft
+            current_page = 1
+            status_filter = None
+        elif normalized in ('next', 'n', '>'):
             current_page = current_page + 1
         elif normalized in ('prev', 'p', '<', 'back'):
             current_page = max(1, current_page - 1)
@@ -938,8 +961,7 @@ class ConversationService:
                 current_page = max(1, int(normalized.replace('page ', '').strip()))
             except (ValueError, IndexError):
                 current_page = 1
-        else:
-            current_page = 1
+        # else: same page (unknown command — just re-display)
 
         skip = (current_page - 1) * per_page
 
@@ -955,28 +977,37 @@ class ConversationService:
             result = self.helpdesk_api.get_my_tickets(
                 user_id=user_id,
                 tenant_id=helpdesk_tenant_id,
+                status_name=status_filter,
                 skip=skip,
                 limit=per_page,
             )
             tickets = result.get("tickets", [])
             total = result.get("total", 0)
         elif customer_id is not None:
-            # Anonymous customer — use local DB as fallback
+            # Anonymous customer — use local DB as fallback.
+            # Query per_page+1 to detect whether a next page exists.
             tickets_raw = self.tickets.list_all(
                 tenant_id=tenant_id, customer_id=customer_id, limit=per_page + 1, offset=skip
             )
-            total = len(tickets_raw)
+            has_more = len(tickets_raw) > per_page
             tickets = []
-            for t in tickets_raw[:per_page]:
+            page_tickets = tickets_raw[:per_page]
+            for t in page_tickets:
+                t_status = t.status.upper() if t.status else "UNKNOWN"
+                # Apply client-side status filter if set
+                if status_filter and t_status.lower() != status_filter.lower():
+                    continue
                 tickets.append({
                     "ticket_number": t.ticket_number,
                     "title": t.subject or t.title,
-                    "status": t.status.upper() if t.status else "UNKNOWN",
+                    "status": t_status,
                     "priority": None,
                     "category": t.category,
                     "created_at": str(t.created_at) if t.created_at else None,
                     "updated_at": str(t.updated_at) if t.updated_at else None,
                 })
+            # Estimate total pages: unknown exact total, use approximate
+            total = (current_page - 1) * per_page + len(tickets) + (per_page if has_more else 0)
         else:
             tickets = []
             total = 0
@@ -994,30 +1025,73 @@ class ConversationService:
         draft['_ticket_page'] = current_page
         session.ticket_draft = draft
 
-        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+        # Keep state as MY_TICKETS_LIST so pagination routing continues to work
+        session.state = 'MY_TICKETS_LIST'
 
-        lines = ['📋 *Your Tickets*\n']
-        for i, t in enumerate(tickets, 1):
-            ticket_num = t.get('ticket_number', 'N/A')
-            title = t.get('title', 'N/A')[:50]
-            status = t.get('status', 'UNKNOWN')
-            lines.append(f' {i}. `{ticket_num}`  *{title}* ({status})')
+        return _build_my_tickets_list(tickets, current_page, total, per_page, status_filter)
 
-        # Pagination info
-        lines.append('')
-        lines.append(f'📄 Page {current_page} of {total_pages} (Total: {total})')
-        lines.append('')
-        lines.append('Options:')
-        lines.append('• Reply with a *ticket number* to see details')
-        if current_page < total_pages:
-            lines.append('• Send *next* for next page')
-        if current_page > 1:
-            lines.append('• Send *prev* for previous page')
-        lines.append('• Send *filter* to filter by status')
-        lines.append('• Send *0* for main menu')
+    def _looks_like_ticket_number(self, text: str) -> bool:
+        """Heuristic: does the text look like a ticket number?
+        
+        Matches patterns like:
+          - TKT-2026-00001
+          - INC-2026-00001
+          - Any alphanumeric with hyphens (e.g. ABC-123)
+        """
+        # Known ticket prefixes (case-insensitive already)
+        if re.match(r'^(tkt|inc|sla|prb|chg|rfc)-\d{4}-\d+', text):
+            return True
+        # Generic: starts with 2-4 uppercase letters, hyphen, digits
+        if re.match(r'^[a-z]{2,4}-\d+', text):
+            return True
+        return False
 
-        session.state = 'CHECKING_TICKET'
-        return _text_reply('\n'.join(lines))
+    def _handle_ticket_lookup(
+        self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
+    ) -> dict:
+        """Look up a single ticket by number and show its details."""
+        ticket_number = text.strip().upper()
+
+        helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+        if customer_id is not None:
+            customer = self.customers.get(customer_id)
+            if customer:
+                registered_user = self.registered_users.get_by_phone_and_tenant(
+                    customer.phone_number, tenant_id
+                )
+                if registered_user and registered_user.helpdesk_tenant_id:
+                    helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
+        else:
+            registered_user = self.registered_users.get_by_phone_and_tenant(
+                session.phone_number, tenant_id
+            )
+            if registered_user and registered_user.helpdesk_tenant_id:
+                helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
+
+        ticket_data = self.helpdesk_api.get_ticket_status(
+            ticket_number=ticket_number,
+            tenant_id=helpdesk_tenant_id,
+        )
+
+        if not ticket_data:
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            if not ticket:
+                return _text_reply(
+                    f'\u274C Ticket `{ticket_number}` was not found.\n\n'
+                    'Please check the number and try again, or send *next*/*prev* to browse tickets.\n\n'
+                    'Send *0* to return to the main menu.'
+                )
+            session.state = 'MAIN_MENU'
+            return _build_ticket_status({
+                'ticket_number': ticket.ticket_number,
+                'status': ticket.status.upper(),
+                'title': ticket.subject,
+                'category': ticket.category,
+                'created_at': str(ticket.created_at),
+            })
+
+        session.state = 'MAIN_MENU'
+        return _build_ticket_status(ticket_data)
 
     def _handle_waiting_comment(
         self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
@@ -1175,9 +1249,62 @@ class ConversationService:
         draft = dict(session.ticket_draft or {})
         draft['category'] = category
         session.ticket_draft = draft
+        session.state = 'WAITING_CC_EMAILS'
+        return _build_cc_prompt()
+
+    def _handle_cc_emails(
+        self, session: WhatsappSession, text: str, customer_id: uuid.UUID | None, tenant_id: uuid.UUID
+    ) -> dict:
+        """Handle optional CC email input after category selection."""
+        if _is_cancel(text):
+            session.ticket_draft = None
+            session.state = 'MAIN_MENU'
+            return _cancel_reply()
+
+        normalized = text.strip().lower()
+
+        # Skip CC emails and go to confirmation
+        if normalized in ('skip', 'none', 'no', '0'):
+            draft = dict(session.ticket_draft or {})
+            session.ticket_draft = draft
+            session.state = 'CONFIRM_TICKET'
+            return _build_confirm_text(draft)
+
+        # Parse comma-separated email addresses
+        raw_emails = [e.strip() for e in text.split(',') if e.strip()]
+        valid_emails = []
+        invalid_emails = []
+
+        import re
+        email_pattern = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+        for email in raw_emails:
+            clean = email.strip().lower()
+            if email_pattern.match(clean):
+                valid_emails.append(clean)
+            else:
+                invalid_emails.append(email)
+
+        if not valid_emails:
+            return _text_reply(
+                '❌ No valid email addresses found.\n\n'
+                'Please enter valid email addresses separated by commas, e.g.:\n'
+                '`manager@example.com, team@example.com`\n\n'
+                'Or send *skip* to continue without CC emails.'
+            )
+
+        if invalid_emails:
+            return _text_reply(
+                f'⚠️ The following addresses are not valid: {", ".join(invalid_emails)}\n\n'
+                f'Valid addresses accepted: {", ".join(valid_emails)}\n\n'
+                'Please correct the invalid addresses or send *skip* to continue.'
+            )
+
+        # Store valid CC emails in draft and show confirmation
+        draft = dict(session.ticket_draft or {})
+        draft['cc_emails'] = valid_emails
+        session.ticket_draft = draft
         session.state = 'CONFIRM_TICKET'
-        # Use text-based confirmation instead of interactive buttons for
-        # better compatibility across WhatsApp clients
         return _build_confirm_text(draft)
 
     def _handle_confirm(
@@ -1227,6 +1354,7 @@ class ConversationService:
                 priority=None,  # Will use default
                 channel='WhatsApp',
                 phone_number=phone_number,
+                cc_emails=draft.get('cc_emails'),
             )
 
             if ticket_data:
@@ -1308,6 +1436,13 @@ class ConversationService:
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
+
+        normalized = text.strip().lower()
+
+        # Redirect pagination commands back to the ticket list handler
+        if normalized in ('next', 'n', 'prev', 'p', 'back', '<', '>', 'filter') or normalized.startswith('page '):
+            session.state = 'MY_TICKETS_LIST'
+            return self._handle_my_tickets_list(session, text, tenant_id, customer_id)
 
         ticket_number = text.strip().upper()
 
