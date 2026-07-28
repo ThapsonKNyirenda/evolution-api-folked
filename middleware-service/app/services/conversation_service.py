@@ -133,6 +133,7 @@ def _build_cc_prompt() -> dict:
 
 
 def _build_confirm_buttons(draft: dict) -> dict:
+    """Text-based confirm prompt for ticket creation (used when user sends invalid input)."""
     subject = draft.get('subject', 'N/A')[:100]
     description = draft.get('description', 'N/A')
     category = draft.get('category', 'N/A')
@@ -146,15 +147,14 @@ def _build_confirm_buttons(draft: dict) -> dict:
     if cc_emails:
         details += f'\u2022 *CC:* {", ".join(cc_emails)}\n'
 
-    return _buttons_reply(
-        text=f'Please review and confirm your ticket details:\n\n{details}',
-        title='\u2705 Confirm Ticket',
-        buttons=[
-            {'type': 'reply', 'displayText': '\u2705 Submit', 'id': 'confirm_submit'},
-            {'type': 'reply', 'displayText': '\u270F\uFE0F Edit Subject', 'id': 'confirm_edit_subject'},
-            {'type': 'reply', 'displayText': '\u274C Cancel', 'id': 'confirm_cancel'},
-        ],
-        footer='Or send 0 to cancel',
+    return _text_reply(
+        f'\u2705 *Confirm Ticket*\n\n'
+        f'{details}\n'
+        f'Reply with:\n'
+        f'1\uFE0F\u20E3 Submit\n'
+        f'2\uFE0F\u20E3 Edit Subject\n'
+        f'3\uFE0F\u20E3 Cancel\n'
+        f'0\uFE0F\u20E3 Main Menu'
     )
 
 
@@ -284,19 +284,17 @@ def _build_my_tickets_menu() -> dict:
 
 
 def _build_status_filter_menu() -> dict:
-    """Build the status filter selection menu."""
-    return _buttons_reply(
-        text='🔍 *Filter Tickets by Status*\n\nSelect a status to filter by:',
-        title='Status Filter',
-        buttons=[
-            {'type': 'reply', 'displayText': '📂 All', 'id': 'filter_all'},
-            {'type': 'reply', 'displayText': '🟢 Open', 'id': 'filter_Open'},
-            {'type': 'reply', 'displayText': '🟡 In Progress', 'id': 'filter_In Progress'},
-            {'type': 'reply', 'displayText': '🟠 Pending', 'id': 'filter_Pending'},
-            {'type': 'reply', 'displayText': '🔵 Resolved', 'id': 'filter_Resolved'},
-            {'type': 'reply', 'displayText': '🔴 Closed', 'id': 'filter_Closed'},
-        ],
-        footer='Send 0 for main menu',
+    """Build the text-based status filter selection menu."""
+    return _text_reply(
+        '🔍 *Filter Tickets by Status*\n\n'
+        'Select a status to filter by:\n\n'
+        '1️⃣ All\n'
+        '2️⃣ Open\n'
+        '3️⃣ In Progress\n'
+        '4️⃣ Resolved\n'
+        '5️⃣ Closed\n'
+        '6️⃣ On Hold\n\n'
+        'Send *0* to return to the main menu.'
     )
 
 
@@ -313,7 +311,7 @@ def _build_comment_prompt(ticket_number: str) -> dict:
 
 
 def _build_comment_ticket_confirm(ticket_data: dict) -> dict:
-    """Build the ticket confirmation prompt showing title before asking for comment."""
+    """Build the ticket confirmation prompt showing title before asking for comment (text-based)."""
     ticket_number = ticket_data.get('ticket_number', 'N/A')
     title = ticket_data.get('title', 'No subject')[:100]
     status = ticket_data.get('status', 'UNKNOWN')
@@ -332,33 +330,27 @@ def _build_comment_ticket_confirm(ticket_data: dict) -> dict:
     if created_str:
         details += f'▸ *Created:* {created_str}\n'
 
-    details += '\nIs this the correct ticket you want to comment on?'
-
-    return _buttons_reply(
-        text=details,
-        title='Confirm Ticket',
-        buttons=[
-            {'type': 'reply', 'displayText': '✅ Yes, continue', 'id': 'ticket_confirm_yes'},
-            {'type': 'reply', 'displayText': '❌ No, try again', 'id': 'ticket_confirm_no'},
-        ],
-        footer='Send 0 to cancel',
+    details += (
+        '\nIs this the correct ticket you want to comment on?\n\n'
+        '1️⃣ Yes, continue\n'
+        '2️⃣ No, try again\n\n'
+        'Send *0* to cancel.'
     )
+
+    return _text_reply(details)
 
 
 def _build_comment_confirm(ticket_number: str, comment: str) -> dict:
-    """Build the confirmation prompt for adding a comment."""
-    return _buttons_reply(
-        text=f'💬 *Confirm Comment*\n\n'
-             f'Ticket: `{ticket_number}`\n'
-             f'Comment: {comment[:200]}{"..." if len(comment) > 200 else ""}\n\n'
-             'Submit this comment?',
-        title='Confirm Comment',
-        buttons=[
-            {'type': 'reply', 'displayText': '✅ Submit', 'id': 'comment_submit'},
-            {'type': 'reply', 'displayText': '✏️ Edit', 'id': 'comment_edit'},
-            {'type': 'reply', 'displayText': '❌ Cancel', 'id': 'comment_cancel'},
-        ],
-        footer='Send 0 to cancel',
+    """Build the text-based confirmation prompt for adding a comment."""
+    return _text_reply(
+        f'💬 *Confirm Comment*\n\n'
+        f'Ticket: `{ticket_number}`\n'
+        f'Comment: {comment[:200]}{"..." if len(comment) > 200 else ""}\n\n'
+        f'Reply with:\n'
+        f'1\uFE0F\u20E3 Submit\n'
+        f'2\uFE0F\u20E3 Edit\n'
+        f'3\uFE0F\u20E3 Cancel\n\n'
+        f'Send *0* to return to the main menu.'
     )
 
 
@@ -556,7 +548,9 @@ class ConversationService:
             # a customer in the helpdesk system, which we don't want for agents.
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
         else:
-            # Not registered — treat as a regular customer
+            # Not registered — create a local customer record for conversation
+            # tracking only. Do NOT sync to the main helpdesk — customers must
+            # be created through the main helpdesk portal.
             customer = self.customers.get_or_create(phone_number, tenant_id)
             customer_id = customer.id
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id)
@@ -566,23 +560,6 @@ class ConversationService:
                 name = push_name or ''
                 if name:
                     self.customers.update(customer, name=name)
-
-            # Sync customer with helpdesk (best-effort)
-            self._sync_customer_with_helpdesk(phone_number, tenant_id, push_name)
-
-            # Update phone registry with latest helpdesk customer ID
-            helpdesk_id = customer.helpdesk_customer_id
-            if helpdesk_id:
-                try:
-                    registry_entry = self.phone_registry.get_by_phone_and_tenant(
-                        phone_number, tenant_id
-                    )
-                    if registry_entry and not registry_entry.helpdesk_customer_id:
-                        self.phone_registry.update_helpdesk_id(
-                            registry_entry.id, helpdesk_id
-                        )
-                except Exception as e:
-                    logger.warning("Failed to update phone registry helpdesk ID: %s", e)
 
         session = self.sessions.get_or_create(phone_number, tenant_id)
         if customer_id:
