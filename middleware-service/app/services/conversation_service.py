@@ -77,9 +77,9 @@ def _cancel_reply() -> dict:
         '📋 *Main Menu*\n\n'
         'Reply with a number:\n'
         '1️⃣ ✉️ Create Ticket\n'
-        '2️⃣ 🎫 View Tickets\n'
+        '2️⃣ 📋 View Tickets\n'
         '3️⃣ 💬 Add Comment\n'
-        '4️⃣ 🎧 Speak to Agent\n\n'
+        '4️⃣ 🗣️ Speak to Agent\n\n'
         'Or just describe your issue and we\'ll help!'
     )
 
@@ -90,9 +90,9 @@ def _build_main_menu() -> dict:
         title='👋 Welcome to Support!',
         buttons=[
             {'type': 'reply', 'displayText': '✉️ Create Ticket', 'id': 'create_ticket'},
-            {'type': 'reply', 'displayText': '🎫 View Tickets', 'id': 'my_tickets_all'},
+            {'type': 'reply', 'displayText': '📋 View Tickets', 'id': 'my_tickets_all'},
             {'type': 'reply', 'displayText': '💬 Add Comment', 'id': 'add_comment'},
-            {'type': 'reply', 'displayText': '🎧 Speak to Agent', 'id': 'speak_agent'},
+            {'type': 'reply', 'displayText': '🗣️ Speak to Agent', 'id': 'speak_agent'},
         ],
         footer='Or type 0 to see the menu',
     )
@@ -272,16 +272,14 @@ def _build_my_tickets_list(tickets: list[dict], page: int, total: int, per_page:
 
 
 def _build_my_tickets_menu() -> dict:
-    """Build the View Tickets menu with filter options."""
-    return _buttons_reply(
-        text='🎫 *View Tickets*\n\nChoose an option:',
-        title='View Tickets',
-        buttons=[
-            {'type': 'reply', 'displayText': '📋 All Tickets', 'id': 'my_tickets_all'},
-            {'type': 'reply', 'displayText': '🔍 Filter by Status', 'id': 'my_tickets_filter'},
-            {'type': 'reply', 'displayText': '🔄 Refresh', 'id': 'my_tickets_refresh'},
-        ],
-        footer='Send 0 for main menu',
+    """Build the View Tickets menu with filter options (text-based)."""
+    return _text_reply(
+        '📋 *View Tickets*\n\n'
+        'Choose an option:\n\n'
+        '1️⃣ All Tickets\n'
+        '2️⃣ Filter by Status\n'
+        '3️⃣ Refresh\n\n'
+        'Send *0* to return to the main menu.'
     )
 
 
@@ -311,6 +309,39 @@ def _build_comment_prompt(ticket_number: str) -> dict:
         f'💬 *Add Comment to Ticket {ticket_number}*\n\n'
         'Please enter your comment:\n\n'
         'Send *0* to cancel and return to the main menu.'
+    )
+
+
+def _build_comment_ticket_confirm(ticket_data: dict) -> dict:
+    """Build the ticket confirmation prompt showing title before asking for comment."""
+    ticket_number = ticket_data.get('ticket_number', 'N/A')
+    title = ticket_data.get('title', 'No subject')[:100]
+    status = ticket_data.get('status', 'UNKNOWN')
+    category = ticket_data.get('category') or 'N/A'
+    created_raw = ticket_data.get('created_at', '')
+    created_str = created_raw[:10] if created_raw and len(created_raw) >= 10 else ''
+
+    details = (
+        f'🔍 *Ticket Found*\n\n'
+        f'▸ *Number:* `{ticket_number}`\n'
+        f'▸ *Title:* {title}\n'
+        f'▸ *Status:* `{status}`\n'
+    )
+    if category:
+        details += f'▸ *Category:* {category}\n'
+    if created_str:
+        details += f'▸ *Created:* {created_str}\n'
+
+    details += '\nIs this the correct ticket you want to comment on?'
+
+    return _buttons_reply(
+        text=details,
+        title='Confirm Ticket',
+        buttons=[
+            {'type': 'reply', 'displayText': '✅ Yes, continue', 'id': 'ticket_confirm_yes'},
+            {'type': 'reply', 'displayText': '❌ No, try again', 'id': 'ticket_confirm_no'},
+        ],
+        footer='Send 0 to cancel',
     )
 
 
@@ -605,6 +636,9 @@ class ConversationService:
         if state == 'ADD_COMMENT_TICKET':
             return self._handle_add_comment_ticket(session, text, tenant_id, customer_id)
 
+        if state == 'CONFIRM_COMMENT_TICKET':
+            return self._handle_confirm_comment_ticket(session, text, tenant_id, customer_id)
+
         if state == 'ADD_COMMENT_MESSAGE':
             return self._handle_add_comment_message(session, text, tenant_id, customer_id)
 
@@ -766,19 +800,103 @@ class ConversationService:
     def _handle_add_comment_ticket(
         self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
     ) -> dict:
-        """Handle ticket number input for adding comment."""
+        """Handle ticket number input for adding comment.
+        
+        Looks up the ticket title and asks the user to confirm
+        they are commenting on the correct ticket.
+        """
         if _is_cancel(text):
             session.state = 'MAIN_MENU'
             return _cancel_reply()
 
         ticket_number = text.strip().upper()
         session.ticket_draft = {'ticket_number': ticket_number}
-        session.state = 'ADD_COMMENT_MESSAGE'
-        return _text_reply(
-            f'💬 *Add Comment to {ticket_number}*\n\n'
-            'Please enter your comment:\n\n'
-            'Send *0* to cancel and return to the main menu.'
+
+        # Look up ticket to confirm with the user
+        helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+        ticket_data = self.helpdesk_api.get_ticket_status(
+            ticket_number=ticket_number,
+            tenant_id=helpdesk_tenant_id,
         )
+
+        if ticket_data:
+            # Ticket found — show title for confirmation
+            session.state = 'CONFIRM_COMMENT_TICKET'
+            return _build_comment_ticket_confirm(ticket_data)
+        else:
+            # Try local database fallback
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            if ticket:
+                ticket_data = {
+                    'ticket_number': ticket.ticket_number,
+                    'title': ticket.subject or ticket.title or 'No subject',
+                    'status': ticket.status.upper() if ticket.status else 'UNKNOWN',
+                    'category': ticket.category,
+                    'created_at': str(ticket.created_at) if ticket.created_at else None,
+                }
+                session.state = 'CONFIRM_COMMENT_TICKET'
+                return _build_comment_ticket_confirm(ticket_data)
+
+            # Ticket not found
+            return _text_reply(
+                f'❌ Ticket `{ticket_number}` was not found.\n\n'
+                'Please check the ticket number and try again, or send *0* to return to the main menu.'
+            )
+
+    def _handle_confirm_comment_ticket(
+        self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
+    ) -> dict:
+        """Handle ticket confirmation — whether to proceed with adding a comment."""
+        if _is_cancel(text):
+            session.ticket_draft = None
+            session.state = 'MAIN_MENU'
+            return _cancel_reply()
+
+        normalized = text.strip().lower()
+
+        if normalized in ('ticket_confirm_yes', '1', 'yes', 'confirm', 'continue', 'y'):
+            # Proceed to comment input
+            ticket_number = session.ticket_draft.get('ticket_number', '')
+            session.state = 'ADD_COMMENT_MESSAGE'
+            return _text_reply(
+                f'💬 *Add Comment to {ticket_number}*\n\n'
+                'Please enter your comment:\n\n'
+                'Send *0* to cancel and return to the main menu.'
+            )
+
+        if normalized in ('ticket_confirm_no', '2', 'no', 'try again', 'n'):
+            # Go back to ticket number input
+            session.state = 'ADD_COMMENT_TICKET'
+            return _text_reply(
+                '💬 *Add Comment to Ticket*\n\n'
+                'Please enter the correct ticket number (e.g., `TKT-2026-00001`).\n\n'
+                'Send *0* to return to the main menu.'
+            )
+
+        # Invalid input — re-show the confirmation with current data
+        ticket_number = session.ticket_draft.get('ticket_number', '')
+        helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+        ticket_data = self.helpdesk_api.get_ticket_status(
+            ticket_number=ticket_number,
+            tenant_id=helpdesk_tenant_id,
+        )
+        if ticket_data:
+            return _build_comment_ticket_confirm(ticket_data)
+        else:
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            if ticket:
+                ticket_data = {
+                    'ticket_number': ticket.ticket_number,
+                    'title': ticket.subject or ticket.title or 'No subject',
+                    'status': ticket.status.upper() if ticket.status else 'UNKNOWN',
+                    'category': ticket.category,
+                    'created_at': str(ticket.created_at) if ticket.created_at else None,
+                }
+                return _build_comment_ticket_confirm(ticket_data)
+            return _text_reply(
+                f'❌ Ticket `{ticket_number}` was not found.\n\n'
+                'Please send *1* to try again or *0* to return to the main menu.'
+            )
 
     def _handle_add_comment_message(
         self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
