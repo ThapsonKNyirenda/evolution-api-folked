@@ -476,7 +476,7 @@ class ConversationService:
 
     def _sync_customer_with_helpdesk(
         self, phone_number: str, tenant_id: uuid.UUID
-    ) -> None:
+    ) -> bool:
         """
         Look up the customer in the main helpdesk system by phone number.
         Tries multiple phone number formats (with/without country code).
@@ -484,8 +484,19 @@ class ConversationService:
 
         Does NOT create customers — only reads existing ones. Customers must
         be created through the main helpdesk portal.
+
+        Returns:
+            True if a matching helpdesk customer was found (or already linked),
+            False if the phone number is not registered as a customer.
         """
         try:
+            # Skip API call if local customer is already linked to helpdesk
+            existing_local = self.customers.get_by_phone_and_tenant(
+                phone_number, tenant_id
+            )
+            if existing_local and existing_local.helpdesk_customer_id:
+                return True
+
             helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
 
             # Try multiple phone number formats to handle both local
@@ -533,12 +544,22 @@ class ConversationService:
                             "Failed to update phone registry helpdesk ID: %s",
                             reg_err,
                         )
+                return True
+
+            logger.info(
+                "No helpdesk customer found for phone %s (tried %d variants)",
+                phone_number, len(phone_variations)
+            )
+            return False
+
         except Exception as e:
             logger.warning(
-                "Failed to sync customer with helpdesk: %s (phone=%s, continuing with local)",
+                "Failed to sync customer with helpdesk: %s (phone=%s, allowing through)",
                 e,
                 phone_number,
             )
+            # If we can't verify (API error etc.), block to be safe
+            return False
 
     @staticmethod
     def _normalize_phone_variations(phone_number: str) -> list[str]:
@@ -599,9 +620,9 @@ class ConversationService:
             # a customer in the helpdesk system, which we don't want for agents.
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
         else:
-            # Not registered — create a local customer record for conversation
-            # tracking only. Then try to link it to an existing customer in the
-            # main helpdesk (read-only lookup, never creates a new customer).
+            # Not registered as an agent — create a local customer record for
+            # conversation tracking only. Then try to link it to an existing
+            # customer in the main helpdesk (read-only lookup, never creates).
             customer = self.customers.get_or_create(phone_number, tenant_id)
             customer_id = customer.id
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id)
@@ -614,7 +635,21 @@ class ConversationService:
 
             # Sync (read-only) with helpdesk to link local customer to any
             # existing helpdesk customer record. Tries multiple phone formats.
-            self._sync_customer_with_helpdesk(phone_number, tenant_id)
+            # If no matching customer is found in the main helpdesk, block
+            # the conversation — the number must be registered first.
+            found = self._sync_customer_with_helpdesk(phone_number, tenant_id)
+            if not found:
+                logger.info(
+                    "Blocked unregistered phone %s for tenant %s",
+                    phone_number, tenant_id,
+                )
+                return _text_reply(
+                    '🔒 *Registration Required*\n\n'
+                    'Your phone number is not registered in our helpdesk system.\n\n'
+                    'To use the WhatsApp chatbot, please contact your administrator '
+                    'to have your phone number registered.\n\n'
+                    'Once registered, send any message to get started.'
+                )
 
         session = self.sessions.get_or_create(phone_number, tenant_id)
         if customer_id:
