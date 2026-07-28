@@ -9,8 +9,8 @@ class TenantRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def create(self, name: str) -> Tenant:
-        tenant = Tenant(name=name)
+    def create(self, name: str, helpdesk_tenant_id: uuid.UUID | None = None) -> Tenant:
+        tenant = Tenant(name=name, helpdesk_tenant_id=helpdesk_tenant_id)
         self.db.add(tenant)
         self.db.commit()
         self.db.refresh(tenant)

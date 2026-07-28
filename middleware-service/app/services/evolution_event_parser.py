@@ -2,6 +2,7 @@ import re
 from typing import Any
 
 from app.core.config import settings
+from app.utils.text_cleaner import clean_surrogates
 
 
 def normalize_phone_number(value: str | None) -> str | None:
@@ -52,6 +53,35 @@ class EvolutionEventParser:
         }
 
     def _extract_text(self, data: dict[str, Any], message: dict[str, Any]) -> str | None:
+        # Check interactive/button response IDs FIRST — these are button click
+        # responses and their IDs are what the state machine expects (e.g.
+        # "my_tickets_all", "create_ticket"). The `conversation` field below
+        # may also contain the button's display text (e.g. "📋 My Tickets")
+        # which would NOT match the expected ID patterns after normalization.
+        buttons_response = message.get('buttonsResponseMessage')
+        if isinstance(buttons_response, dict):
+            bid = buttons_response.get('selectedButtonId')
+            if isinstance(bid, str) and bid.strip():
+                return clean_surrogates(bid.strip())
+
+        template_button = message.get('templateButtonReplyMessage')
+        if isinstance(template_button, dict):
+            tid = template_button.get('selectedId')
+            if isinstance(tid, str) and tid.strip():
+                return clean_surrogates(tid.strip())
+
+        list_response = message.get('listResponseMessage')
+        if isinstance(list_response, dict):
+            single_reply = list_response.get('singleSelectReply', {})
+            if isinstance(single_reply, dict):
+                row_id = single_reply.get('selectedRowId')
+                if isinstance(row_id, str) and row_id.strip():
+                    return clean_surrogates(row_id.strip())
+            title = list_response.get('title')
+            if isinstance(title, str) and title.strip():
+                return clean_surrogates(title.strip())
+
+        # Regular text fields — order reflects typical priority
         candidates = [
             data.get('text'),
             data.get('body'),
@@ -72,20 +102,12 @@ class EvolutionEventParser:
         if isinstance(video_message, dict):
             candidates.append(video_message.get('caption'))
 
-        buttons_response = message.get('buttonsResponseMessage')
+        # Fallback: button display text (only if button ID wasn't found above)
         if isinstance(buttons_response, dict):
-            candidates.append(buttons_response.get('selectedButtonId'))
             candidates.append(buttons_response.get('displayText'))
-
-        list_response = message.get('listResponseMessage')
-        if isinstance(list_response, dict):
-            single_reply = list_response.get('singleSelectReply', {})
-            if isinstance(single_reply, dict):
-                candidates.append(single_reply.get('selectedRowId'))
-            candidates.append(list_response.get('title'))
 
         for candidate in candidates:
             if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
+                return clean_surrogates(candidate.strip())
 
         return None

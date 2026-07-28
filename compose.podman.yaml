@@ -27,8 +27,8 @@ services:
     depends_on:
       - api
     ports:
-      - "80:80"
-      - "443:443"
+      - "8082:80"
+      - "8445:443"
     environment:
       - DOMAIN=${DOMAIN}
     volumes:

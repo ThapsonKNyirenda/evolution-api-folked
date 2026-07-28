@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.repositories import (
     CustomerRepository,
     InstanceTenantRepository,
+    RegisteredUserRepository,
     TenantRepository,
     TicketRepository,
 )
@@ -27,13 +28,38 @@ class SyncService:
         self.customers_repo = CustomerRepository(db)
         self.tickets_repo = TicketRepository(db)
         self.instance_tenants_repo = InstanceTenantRepository(db)
+        self.registered_users_repo = RegisteredUserRepository(db)
+
+    def _fetch_all_pages(self, fetch_fn, data_key: str, **kwargs) -> list[dict]:
+        """
+        Helper to fetch all pages from a paginated helpdesk API endpoint.
+        Iterates through all pages until total items are fetched.
+        fetch_fn: HelpdeskAPIClient method (e.g., self.helpdesk_api.list_tenants)
+        data_key: key in response dict containing items (e.g., 'tenants')
+        **kwargs: additional params (page and per_page are managed internally)
+        """
+        page = 1
+        per_page = 200
+        all_items = []
+
+        while True:
+            data = fetch_fn(page=page, per_page=per_page, **kwargs)
+            items = data.get(data_key, [])
+            all_items.extend(items)
+            total = data.get('total', 0)
+            if page * per_page >= total:
+                break
+            page += 1
+
+        return all_items
 
     def sync_all(self) -> dict[str, Any]:
-        """Run a full sync of tenants, customers, and tickets."""
+        """Run a full sync of tenants, customers, tickets, and registered_users."""
         result = {
             'tenants': self.sync_tenants(),
             'customers': {'synced': 0, 'errors': []},
             'tickets': {'synced': 0, 'errors': []},
+            'registered_users': {'synced': 0, 'errors': []},
         }
 
         # Sync customers for each tenant
@@ -60,20 +86,35 @@ class SyncService:
                 logger.error('Error syncing tickets for tenant %s: %s', t.get('name'), e)
                 result['tickets']['errors'].append(str(e))
 
+        # Sync registered_users for each tenant
+        for t in result['tenants'].get('synced_tenants', []):
+            try:
+                tenant_id = t.get('local_id') or t.get('id')
+                if tenant_id:
+                    reg_result = self.sync_registered_users(tenant_id=tenant_id)
+                    result['registered_users']['synced'] += reg_result.get('synced', 0)
+                    result['registered_users']['errors'].extend(reg_result.get('errors', []))
+            except Exception as e:
+                logger.error('Error syncing registered_users for tenant %s: %s', t.get('name'), e)
+                result['registered_users']['errors'].append(str(e))
+
         return result
 
     def sync_tenants(self) -> dict[str, Any]:
         """
         Pull all tenants from the helpdesk system and upsert locally.
+        Iterates through all pages.
         Returns stats about what was synced.
         """
         synced = []
         errors = []
 
         try:
-            data = self.helpdesk_api.list_tenants(page=1, per_page=200)
-            tenants = data.get('tenants', [])
-            logger.info('Fetched %d tenants from helpdesk API', len(tenants))
+            tenants = self._fetch_all_pages(
+                self.helpdesk_api.list_tenants,
+                data_key='tenants',
+            )
+            logger.info('Fetched %d tenants from helpdesk API (all pages)', len(tenants))
 
             for ht in tenants:
                 try:
@@ -119,15 +160,11 @@ class SyncService:
 
         return {'synced': len(synced), 'synced_tenants': synced, 'errors': errors}
 
-    def sync_customers(
-        self,
-        tenant_id: uuid.UUID | None = None,
-        page: int = 1,
-        per_page: int = 200,
-    ) -> dict[str, Any]:
+    def sync_customers(self, tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
         """
-        Pull customers from the helpdesk system.
+        Pull all customers from the helpdesk system for a given tenant.
         If tenant_id is provided, only fetch customers for that local tenant.
+        Iterates through all pages.
         Returns stats about what was synced.
         """
         synced = []
@@ -141,13 +178,12 @@ class SyncService:
                 if local_tenant and local_tenant.helpdesk_tenant_id:
                     helpdesk_tenant_id = str(local_tenant.helpdesk_tenant_id)
 
-            data = self.helpdesk_api.list_customers(
+            customers = self._fetch_all_pages(
+                self.helpdesk_api.list_customers,
+                data_key='customers',
                 tenant_id=helpdesk_tenant_id,
-                page=page,
-                per_page=per_page,
             )
-            customers = data.get('customers', [])
-            logger.info('Fetched %d customers from helpdesk API', len(customers))
+            logger.info('Fetched %d customers from helpdesk API (all pages)', len(customers))
 
             for hc in customers:
                 try:
@@ -224,11 +260,10 @@ class SyncService:
         self,
         tenant_id: uuid.UUID | None = None,
         customer_id: uuid.UUID | None = None,
-        page: int = 1,
-        per_page: int = 200,
     ) -> dict[str, Any]:
         """
-        Pull tickets from the helpdesk system into the local database.
+        Pull all tickets from the helpdesk system for a given tenant.
+        Iterates through all pages.
         Returns stats about what was synced.
         """
         synced = []
@@ -242,13 +277,13 @@ class SyncService:
                 if local_tenant and local_tenant.helpdesk_tenant_id:
                     helpdesk_tenant_id = str(local_tenant.helpdesk_tenant_id)
 
-            data = self.helpdesk_api.list_tickets(
+            tickets = self._fetch_all_pages(
+                self.helpdesk_api.list_tickets,
+                data_key='tickets',
                 tenant_id=helpdesk_tenant_id,
-                page=page,
-                per_page=per_page,
+                customer_id=str(customer_id) if customer_id else None,
             )
-            tickets = data.get('tickets', [])
-            logger.info('Fetched %d tickets from helpdesk API', len(tickets))
+            logger.info('Fetched %d tickets from helpdesk API (all pages)', len(tickets))
 
             for ht in tickets:
                 try:
@@ -328,5 +363,179 @@ class SyncService:
         except Exception as e:
             logger.error('Failed to fetch tickets from helpdesk: %s', e)
             errors.append(f"Fetch tickets: {e}")
+
+        return {'synced': len(synced), 'errors': errors}
+
+    def sync_registered_users(self, tenant_id: uuid.UUID) -> dict[str, Any]:
+        """
+        Pull internal users from the helpdesk system and sync phone→user mappings.
+        
+        The helpdesk system is the source of truth for phone-to-user mappings.
+        Users with a phone_number set in the helpdesk are automatically
+        created/updated as RegisteredUser entries in the middleware.
+        Users whose phone_number was removed are deactivated.
+        
+        This replaces the old approach where the middleware's /phone-user/link
+        endpoint was responsible for creating the mappings.
+        Returns stats about what was synced.
+        """
+        synced = []
+        errors = []
+
+        try:
+            # Resolve helpdesk tenant_id from local tenant_id
+            local_tenant = self.tenants_repo.get(tenant_id)
+            if not local_tenant or not local_tenant.helpdesk_tenant_id:
+                logger.warning('No helpdesk tenant mapping for local tenant %s', tenant_id)
+                return {'synced': 0, 'errors': ['No helpdesk tenant mapping']}
+
+            helpdesk_tenant_id = str(local_tenant.helpdesk_tenant_id)
+
+            # Fetch all users for this tenant from helpdesk
+            users = self._fetch_all_pages(
+                self.helpdesk_api.list_users,
+                data_key='users',
+                tenant_id=helpdesk_tenant_id,
+            )
+            logger.info('Fetched %d users from helpdesk for tenant %s', len(users), tenant_id)
+
+            # Track which helpdesk user IDs we've processed
+            processed_helpdesk_ids = set()
+
+            for u in users:
+                uid = u.get('id')
+                phone = u.get('phone_number', '') or ''
+                if not uid:
+                    continue
+
+                processed_helpdesk_ids.add(uid)
+
+                if not phone.strip():
+                    # User has no phone number — deactivate any existing registered_user
+                    existing = self.registered_users_repo.get_by_helpdesk_user_id(
+                        uuid.UUID(uid), tenant_id
+                    )
+                    if existing and existing.is_active:
+                        self.registered_users_repo.deactivate(existing.id)
+                        logger.info(
+                            'Deactivated registered_user for %s - phone_number removed in helpdesk',
+                            u.get('email', '?')
+                        )
+                        synced.append({'phone': existing.phone_number, 'action': 'deactivated'})
+                    continue
+
+                # User has a phone number — create or update registered_user
+                helpdesk_user_id = uuid.UUID(uid)
+                phone_number = phone.strip()
+
+                # Build updates dict from helpdesk user data
+                updates = {}
+                for field in ['username', 'email', 'first_name', 'last_name', 'display_name']:
+                    h_value = u.get(field)
+                    if h_value:
+                        updates[field] = h_value
+
+                # Sync is_active status
+                h_active = u.get('is_active', True)
+                updates['is_active'] = h_active
+
+                # Sync helpdesk_tenant_id
+                h_tenant = u.get('tenant_id')
+                helpdesk_tenant_id_val = None
+                if h_tenant:
+                    try:
+                        helpdesk_tenant_id_val = uuid.UUID(h_tenant)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Check if a registered_user already exists for this phone or helpdesk_user_id
+                existing_by_phone = self.registered_users_repo.get_by_phone_and_tenant(
+                    phone_number, tenant_id
+                )
+                existing_by_uid = self.registered_users_repo.get_by_helpdesk_user_id(
+                    helpdesk_user_id, tenant_id
+                )
+
+                existing = existing_by_phone or existing_by_uid
+
+                if existing:
+                    # If the phone number changed on the helpdesk user, we need to
+                    # handle the transition: deactivate old entry, create new one
+                    if existing_by_uid and existing_by_uid.phone_number != phone_number:
+                        # Phone number changed — deactivate old entry
+                        if existing_by_uid.is_active:
+                            self.registered_users_repo.deactivate(existing_by_uid.id)
+                            logger.info(
+                                'Phone changed for user %s: %s -> %s',
+                                u.get('email', '?'),
+                                existing_by_uid.phone_number,
+                                phone_number,
+                            )
+                        # Create new entry with updated phone
+                        self.registered_users_repo.get_or_create(
+                            phone_number=phone_number,
+                            tenant_id=tenant_id,
+                            helpdesk_user_id=helpdesk_user_id,
+                            helpdesk_tenant_id=helpdesk_tenant_id_val,
+                            **updates,
+                        )
+                        synced.append({
+                            'phone': phone_number,
+                            'action': 'created (phone changed)',
+                        })
+                        continue
+
+                    # Update existing entry
+                    self.registered_users_repo.get_or_create(
+                        phone_number=phone_number,
+                        tenant_id=tenant_id,
+                        helpdesk_user_id=helpdesk_user_id,
+                        helpdesk_tenant_id=helpdesk_tenant_id_val,
+                        **updates,
+                    )
+                    synced.append({
+                        'phone': phone_number,
+                        'action': 'updated',
+                        'fields': list(updates.keys()),
+                    })
+                else:
+                    # Create new registered_user from helpdesk data
+                    self.registered_users_repo.get_or_create(
+                        phone_number=phone_number,
+                        tenant_id=tenant_id,
+                        helpdesk_user_id=helpdesk_user_id,
+                        helpdesk_tenant_id=helpdesk_tenant_id_val,
+                        **updates,
+                    )
+                    logger.info(
+                        'Created registered_user for %s with phone %s',
+                        u.get('email', '?'),
+                        phone_number,
+                    )
+                    synced.append({
+                        'phone': phone_number,
+                        'action': 'created',
+                    })
+
+            # Deactivate registered_users whose helpdesk user no longer exists
+            local_registered = self.registered_users_repo.list_by_tenant(tenant_id, active_only=False)
+            for reg in local_registered:
+                h_id_str = str(reg.helpdesk_user_id)
+                if h_id_str not in processed_helpdesk_ids:
+                    if reg.is_active:
+                        self.registered_users_repo.deactivate(reg.id)
+                        logger.info(
+                            'Deactivated registered_user %s - helpdesk user %s not found',
+                            reg.phone_number,
+                            h_id_str,
+                        )
+                        synced.append({
+                            'phone': reg.phone_number,
+                            'action': 'deactivated (user deleted)',
+                        })
+
+        except Exception as e:
+            logger.error('Failed to sync registered_users: %s', e, exc_info=True)
+            errors.append(f"Sync registered_users: {e}")
 
         return {'synced': len(synced), 'errors': errors}

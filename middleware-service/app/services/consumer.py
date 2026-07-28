@@ -56,6 +56,8 @@ async def start_consumer(rabbitmq: RabbitMQService):
                     await evo.send_message(instance_name, parsed.get('recipient') or parsed['customer_phone_number'], reply)
                 except Exception as e:
                     logger.warning('Failed to send reply via Evolution API: %s', e)
+                    if hasattr(e, 'response') and e.response is not None:
+                        logger.warning('Response status: %s, body: %s', e.response.status_code, e.response.text)
 
                 logger.info(
                     'Conversation processed: instance=%s phone=%s reply_type=%s',

@@ -267,8 +267,6 @@ export type Auth = {
 
 export type DelInstance = number | boolean;
 
-export type Language = string | 'en';
-
 export type GlobalWebhook = {
   URL: string;
   ENABLED: boolean;
@@ -406,7 +404,6 @@ export interface Env {
   LOG: Log;
   DEL_INSTANCE: DelInstance;
   DEL_TEMP_INSTANCES: boolean;
-  LANGUAGE: Language;
   WEBHOOK: Webhook;
   PUSHER: Pusher;
   CONFIG_SESSION_PHONE: ConfigSessionPhone;
@@ -743,7 +740,6 @@ export class ConfigService {
       DEL_TEMP_INSTANCES: isBooleanString(process.env?.DEL_TEMP_INSTANCES)
         ? process.env.DEL_TEMP_INSTANCES === 'true'
         : true,
-      LANGUAGE: process.env?.LANGUAGE || 'en',
       WEBHOOK: {
         GLOBAL: {
           URL: process.env?.WEBHOOK_GLOBAL_URL || '',
