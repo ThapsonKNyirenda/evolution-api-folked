@@ -475,20 +475,36 @@ class ConversationService:
             return None
 
     def _sync_customer_with_helpdesk(
-        self, phone_number: str, tenant_id: uuid.UUID, push_name: str | None = None
+        self, phone_number: str, tenant_id: uuid.UUID
     ) -> None:
         """
-        Ensure the customer exists in the main helpdesk system and link them.
-        Updates the local customer record with the helpdesk_customer_id.
-        Translates local tenant_id to the helpdesk tenant_id.
+        Look up the customer in the main helpdesk system by phone number.
+        Tries multiple phone number formats (with/without country code).
+        Updates the local customer record with the helpdesk_customer_id if found.
+
+        Does NOT create customers — only reads existing ones. Customers must
+        be created through the main helpdesk portal.
         """
         try:
             helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
-            helpdesk_customer = self.helpdesk_api.get_or_create_customer(
-                tenant_id=helpdesk_tenant_id,
-                phone_number=phone_number,
-                customer_name=push_name,
-            )
+
+            # Try multiple phone number formats to handle both local
+            # (0880218905) and international (265880218905) formats.
+            phone_variations = self._normalize_phone_variations(phone_number)
+
+            helpdesk_customer = None
+            for variant in phone_variations:
+                helpdesk_customer = self.helpdesk_api.lookup_customer_by_phone(
+                    phone_number=variant,
+                    tenant_id=helpdesk_tenant_id,
+                )
+                if helpdesk_customer:
+                    logger.info(
+                        "Found helpdesk customer %s via phone variant %s (original: %s)",
+                        helpdesk_customer.get("id"), variant, phone_number
+                    )
+                    break
+
             if helpdesk_customer and helpdesk_customer.get("id"):
                 helpdesk_id = helpdesk_customer["id"]
                 # Update local customer record with helpdesk reference
@@ -524,6 +540,41 @@ class ConversationService:
                 phone_number,
             )
 
+    @staticmethod
+    def _normalize_phone_variations(phone_number: str) -> list[str]:
+        """Generate phone number variations for lookup.
+
+        Handles numbers with and without country code prefix.
+        Malawi country code is 265. Common formats:
+          - 0880218905  (local format, leading 0)
+          - 265880218905 (with country code, no leading 0)
+          - 880218905    (no prefix at all)
+        """
+        # Strip any non-digit characters
+        digits = re.sub(r'\D', '', phone_number)
+
+        variations = [phone_number, digits]
+
+        # If starts with 0, try with country code 265 (e.g. 0880218905 → 265880218905)
+        if digits.startswith('0'):
+            variations.append('265' + digits[1:])
+
+        # If starts with 265, try with leading 0 (e.g. 265880218905 → 0880218905)
+        if digits.startswith('265') and len(digits) > 3:
+            variations.append('0' + digits[3:])
+            # Also try just the national number without 0 (e.g. 265880218905 → 880218905)
+            variations.append(digits[3:])
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for v in variations:
+            if v not in seen:
+                seen.add(v)
+                unique.append(v)
+
+        return unique
+
     def process_message(
         self, instance_name: str, phone_number: str, text: str, message_id: str | None = None, push_name: str | None = None
     ) -> dict:
@@ -549,8 +600,8 @@ class ConversationService:
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
         else:
             # Not registered — create a local customer record for conversation
-            # tracking only. Do NOT sync to the main helpdesk — customers must
-            # be created through the main helpdesk portal.
+            # tracking only. Then try to link it to an existing customer in the
+            # main helpdesk (read-only lookup, never creates a new customer).
             customer = self.customers.get_or_create(phone_number, tenant_id)
             customer_id = customer.id
             self.phone_registry.get_or_create(phone_number, tenant_id, customer_id)
@@ -560,6 +611,10 @@ class ConversationService:
                 name = push_name or ''
                 if name:
                     self.customers.update(customer, name=name)
+
+            # Sync (read-only) with helpdesk to link local customer to any
+            # existing helpdesk customer record. Tries multiple phone formats.
+            self._sync_customer_with_helpdesk(phone_number, tenant_id)
 
         session = self.sessions.get_or_create(phone_number, tenant_id)
         if customer_id:
