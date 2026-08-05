@@ -247,12 +247,24 @@ class HelpdeskAPIClient:
         self,
         ticket_number: str,
         tenant_id: str | UUID | None = None,
+        user_id: str | UUID | None = None,
+        customer_id: str | UUID | None = None,
     ) -> dict[str, Any] | None:
         """
         Get ticket status and details from the helpdesk backend.
+
+        When `user_id` (registered user) or `customer_id` (unregistered customer)
+        is provided, the backend enforces the same role/customer scoping as the
+        main portal. If the caller has no access to the ticket the method returns
+        `{"access_denied": True}` so the caller can respond with a friendly
+        message instead of leaking ticket existence.
         """
         url = f"{self.base_url}/api/v1/whatsapp/tickets/{ticket_number}"
         params = {"tenant_id": self._tenant_id(tenant_id)}
+        if user_id:
+            params["user_id"] = str(user_id)
+        elif customer_id:
+            params["customer_id"] = str(customer_id)
 
         try:
             response = httpx.get(
@@ -267,6 +279,12 @@ class HelpdeskAPIClient:
             if e.response.status_code == 404:
                 logger.info("Ticket %s not found in helpdesk", ticket_number)
                 return None
+            if e.response.status_code == 403:
+                logger.info(
+                    "User %s does not have access to ticket %s",
+                    user_id, ticket_number,
+                )
+                return {"access_denied": True}
             logger.error(
                 "Helpdesk API error fetching ticket (status %s): %s",
                 e.response.status_code,
@@ -775,6 +793,16 @@ class HelpdeskAPIClient:
                     "Ticket %s not found for adding comment as user", ticket_number
                 )
                 return None
+            if e.response.status_code == 403:
+                logger.info(
+                    "User %s does not have access to comment on ticket %s",
+                    user_id, ticket_number,
+                )
+                return {
+                    "success": False,
+                    "access_denied": True,
+                    "message": "You do not have access to comment on this ticket",
+                }
             logger.error(
                 "Helpdesk API error adding comment as user (status %s): %s",
                 e.response.status_code,

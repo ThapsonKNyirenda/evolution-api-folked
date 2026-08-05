@@ -78,8 +78,7 @@ def _cancel_reply() -> dict:
         'Reply with a number:\n'
         '1️⃣ ✉️ Create Ticket\n'
         '2️⃣ 📋 View Tickets\n'
-        '3️⃣ 💬 Add Comment\n'
-        '4️⃣ 🗣️ Speak to Agent\n\n'
+        '3️⃣ 💬 Add Comment\n\n'
         'Or just describe your issue and we\'ll help!'
     )
 
@@ -92,7 +91,6 @@ def _build_main_menu() -> dict:
             {'type': 'reply', 'displayText': '✉️ Create Ticket', 'id': 'create_ticket'},
             {'type': 'reply', 'displayText': '📋 View Tickets', 'id': 'my_tickets_all'},
             {'type': 'reply', 'displayText': '💬 Add Comment', 'id': 'add_comment'},
-            {'type': 'reply', 'displayText': '🗣️ Speak to Agent', 'id': 'speak_agent'},
         ],
         footer='Or type 0 to see the menu',
     )
@@ -225,6 +223,19 @@ def _build_escalate_reply() -> dict:
     )
 
 
+def _build_access_denied(ticket_number: str | None = None) -> dict:
+    """Build a friendly reply when the user tries to view/comment on a ticket
+    they do not have access to (e.g. mistyped a ticket number that belongs to
+    another customer)."""
+    num_line = f' for ticket `{ticket_number}`' if ticket_number else ''
+    return _text_reply(
+        f'🔒 *Access Denied*{num_line}\n\n'
+        'You do not have permission to view or comment on this ticket.\n\n'
+        'Only tickets belonging to your account are accessible.\n\n'
+        'Send *0* to return to the main menu.'
+    )
+
+
 # ── My Tickets Helper Functions ───────────────────────────
 
 
@@ -278,7 +289,8 @@ def _build_my_tickets_menu() -> dict:
         'Choose an option:\n\n'
         '1️⃣ All Tickets\n'
         '2️⃣ Filter by Status\n'
-        '3️⃣ Refresh\n\n'
+        '3️⃣ View Ticket Details\n'
+        '4️⃣ Refresh\n\n'
         'Send *0* to return to the main menu.'
     )
 
@@ -399,6 +411,74 @@ class ConversationService:
         if tenant and tenant.helpdesk_tenant_id:
             return str(tenant.helpdesk_tenant_id)
         return str(local_tenant_id)
+
+    def _get_registered_user(self, session: WhatsappSession, tenant_id: uuid.UUID) -> dict | None:
+        """
+        Return the registered helpdesk user info for a session's phone number,
+        or None if the phone is not registered. Used to attach the user's
+        helpdesk user_id to ticket lookups so the backend can enforce access.
+        """
+        try:
+            registration = self._check_user_registration(session.phone_number, tenant_id, enrich=False)
+            return registration if registration and registration.get("user_id") else None
+        except Exception:
+            return None
+
+    def _resolve_local_customer_scope(
+        self,
+        customer_id: uuid.UUID | None,
+        tenant_id: uuid.UUID,
+        registration: dict | None,
+    ) -> uuid.UUID | None:
+        """
+        Resolve the LOCAL customer id that should scope a local-DB ticket lookup,
+        or None for users with full access (pure agents/admins).
+
+        - Anonymous customers: `customer_id` is already the local customer id.
+        - Registered customer contacts: map their helpdesk customer_id to the
+          local customer via the helpdesk_customer_id link. If the mapping is
+          missing we return a sentinel id so the local lookup fails closed.
+        - Pure agents/admins (no customer affiliation): None → no scoping.
+        """
+        if customer_id is not None and not registration:
+            return customer_id
+
+        if registration and registration.get("customer_id"):
+            try:
+                helpdesk_cid = uuid.UUID(str(registration["customer_id"]))
+                local = self.customers.get_by_helpdesk_id(helpdesk_cid)
+                if local:
+                    return local.id
+            except (ValueError, TypeError, AttributeError):
+                pass
+            # Customer contact but no local mapping available → fail closed
+            return uuid.UUID(int=0)
+
+        return None
+
+    def _resolve_access_params(
+        self,
+        session: WhatsappSession,
+        customer_id: uuid.UUID | None,
+        tenant_id: uuid.UUID,
+        registration: dict | None,
+    ) -> tuple[str | None, str | None]:
+        """
+        Resolve the backend access-enforcement parameters for a session:
+
+        - Registered user → (user_id, None): backend checks roles/customer scope.
+        - Anonymous customer → (None, helpdesk_customer_id): backend checks the
+          ticket belongs to that customer. If the local customer is not linked
+          to a helpdesk customer, returns (None, None) so the caller falls back
+          to the scoped local lookup.
+        """
+        if registration and registration.get("user_id"):
+            return registration["user_id"], None
+        if customer_id is not None:
+            customer = self.customers.get(customer_id)
+            if customer and customer.helpdesk_customer_id:
+                return None, str(customer.helpdesk_customer_id)
+        return None, None
 
     def _is_session_stale(self, session: WhatsappSession) -> bool:
         from datetime import datetime, timedelta
@@ -744,8 +824,13 @@ class ConversationService:
             self.sessions.set_customer(session, customer_id)
 
         if self._is_session_stale(session):
+            # Session expired — any message just returns the user to the main menu.
+            # The message is NOT acted upon (e.g. a ticket number typed in an old
+            # conversation must not trigger a lookup or any other action).
             session.ticket_draft = None
             session.state = 'MAIN_MENU'
+            self.sessions.update_state(session, session.state)
+            return _cancel_reply()
 
         reply = self._handle_state(session, text.strip(), customer_id, tenant_id)
         self.sessions.update_state(session, session.state)
@@ -780,6 +865,9 @@ class ConversationService:
         # New states for My Tickets
         if state == 'MY_TICKETS_MENU':
             return self._handle_my_tickets_menu(session, text, tenant_id, customer_id)
+
+        if state == 'MY_TICKETS_VIEW_DETAILS':
+            return self._handle_my_tickets_view_details(session, text, tenant_id, customer_id)
 
         if state == 'MY_TICKETS_LIST':
             return self._handle_my_tickets_list(session, text, tenant_id, customer_id)
@@ -854,10 +942,6 @@ class ConversationService:
             # Start comment flow
             return self._handle_add_comment_start(session, tenant_id, customer_id)
 
-        if choice in ('4', 'speak_agent', 'speak to agent', 'agent', '5'):
-            session.state = 'MAIN_MENU'
-            return _build_escalate_reply()
-
         if choice in ('check_ticket', 'check'):
             # Direct ticket number lookup
             session.state = 'CHECKING_TICKET'
@@ -925,8 +1009,17 @@ class ConversationService:
 
         status_filter = status_map.get(normalized)
         if status_filter is None and normalized not in ('1', 'all'):
+            # Wrong input — resend the current filter menu
             return _text_reply(
                 '❌ Invalid option. Please reply with a number (1-6) or the status name.\n\n'
+                '🔍 *Filter My Tickets by Status*\n\n'
+                'Reply with the number of the status you want to filter by:\n\n'
+                '1️⃣ All\n'
+                '2️⃣ Open\n'
+                '3️⃣ In Progress\n'
+                '4️⃣ Resolved\n'
+                '5️⃣ Closed\n'
+                '6️⃣ On Hold\n\n'
                 'Send *0* to return to the main menu.'
             )
 
@@ -967,20 +1060,33 @@ class ConversationService:
         ticket_number = text.strip().upper()
         session.ticket_draft = {'ticket_number': ticket_number}
 
+        # Attach the registered user / customer so the backend enforces scoping.
+        registration = self._get_registered_user(session, tenant_id)
+        user_id, customer_scope_id = self._resolve_access_params(
+            session, customer_id, tenant_id, registration
+        )
+
         # Look up ticket to confirm with the user
         helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
         ticket_data = self.helpdesk_api.get_ticket_status(
             ticket_number=ticket_number,
             tenant_id=helpdesk_tenant_id,
+            user_id=user_id,
+            customer_id=customer_scope_id,
         )
+
+        # User typed a ticket number they do not have access to.
+        if ticket_data and ticket_data.get("access_denied"):
+            return _build_access_denied(ticket_number)
 
         if ticket_data:
             # Ticket found — show title for confirmation
             session.state = 'CONFIRM_COMMENT_TICKET'
             return _build_comment_ticket_confirm(ticket_data)
         else:
-            # Try local database fallback
-            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            # Try local database fallback (scoped to the user's customer)
+            local_cid = self._resolve_local_customer_scope(customer_id, tenant_id, registration)
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id, customer_id=local_cid)
             if ticket:
                 ticket_data = {
                     'ticket_number': ticket.ticket_number,
@@ -1030,15 +1136,24 @@ class ConversationService:
 
         # Invalid input — re-show the confirmation with current data
         ticket_number = session.ticket_draft.get('ticket_number', '')
+        registration = self._get_registered_user(session, tenant_id)
+        user_id, customer_scope_id = self._resolve_access_params(
+            session, customer_id, tenant_id, registration
+        )
         helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
         ticket_data = self.helpdesk_api.get_ticket_status(
             ticket_number=ticket_number,
             tenant_id=helpdesk_tenant_id,
+            user_id=user_id,
+            customer_id=customer_scope_id,
         )
+        if ticket_data and ticket_data.get("access_denied"):
+            return _build_access_denied(ticket_number)
         if ticket_data:
             return _build_comment_ticket_confirm(ticket_data)
         else:
-            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            local_cid = self._resolve_local_customer_scope(customer_id, tenant_id, registration)
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id, customer_id=local_cid)
             if ticket:
                 ticket_data = {
                     'ticket_number': ticket.ticket_number,
@@ -1110,6 +1225,9 @@ class ConversationService:
         session.ticket_draft = None
         session.state = 'MAIN_MENU'
 
+        if result and result.get("access_denied"):
+            return _build_access_denied(ticket_number)
+
         if result and result.get("success"):
             return _text_reply(
                 f'✅ *Comment Added Successfully*\n\n'
@@ -1156,7 +1274,17 @@ class ConversationService:
                 'Send *0* to return to the main menu.'
             )
 
-        if normalized in ('3', 'refresh', 'my_tickets_refresh'):
+        if normalized in ('3', 'details', 'view details', 'view_ticket_details', 'ticket details'):
+            # View ticket details — prompt for ticket number
+            session.state = 'MY_TICKETS_VIEW_DETAILS'
+            return _text_reply(
+                '🔍 *View Ticket Details*\n\n'
+                'Please enter the ticket number you want to view\n'
+                '(e.g., `TKT-2026-00001`).\n\n'
+                'Send *0* to return to the View Tickets menu.'
+            )
+
+        if normalized in ('4', 'refresh', 'my_tickets_refresh'):
             # Refresh the list (clear filter, go to first page)
             session.state = 'MY_TICKETS_LIST'
             draft = dict(session.ticket_draft or {})
@@ -1172,6 +1300,88 @@ class ConversationService:
 
         # Show the menu
         return _build_my_tickets_menu()
+
+    def _handle_my_tickets_view_details(
+        self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
+    ) -> dict:
+        """Handle the View Ticket Details prompt — user types a ticket number.
+        
+        Looks up the ticket and shows its details, then returns to the
+        View Tickets menu (MY_TICKETS_MENU) instead of the main menu.
+        """
+        if _is_cancel(text):
+            session.state = 'MY_TICKETS_MENU'
+            return _build_my_tickets_menu()
+
+        ticket_number = text.strip().upper()
+
+        # Validate basic ticket number format
+        if not self._looks_like_ticket_number(ticket_number.lower()):
+            return _text_reply(
+                '❌ *Invalid Ticket Number*\n\n'
+                f'"{text}" does not look like a valid ticket number.\n'
+                'Please enter a ticket number (e.g., `TKT-2026-00001`).\n\n'
+                'Send *0* to return to the View Tickets menu.'
+            )
+
+        # Use the same lookup logic as _handle_ticket_lookup but return
+        # to MY_TICKETS_MENU instead of MAIN_MENU afterwards.
+        registration = self._get_registered_user(session, tenant_id)
+        user_id, customer_scope_id = self._resolve_access_params(
+            session, customer_id, tenant_id, registration
+        )
+
+        helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+        if customer_id is not None:
+            customer = self.customers.get(customer_id)
+            if customer:
+                registered_user = self.registered_users.get_by_phone_and_tenant(
+                    customer.phone_number, tenant_id
+                )
+                if registered_user and registered_user.helpdesk_tenant_id:
+                    helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
+        else:
+            registered_user = self.registered_users.get_by_phone_and_tenant(
+                session.phone_number, tenant_id
+            )
+            if registered_user and registered_user.helpdesk_tenant_id:
+                helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
+
+        ticket_data = self.helpdesk_api.get_ticket_status(
+            ticket_number=ticket_number,
+            tenant_id=helpdesk_tenant_id,
+            user_id=user_id,
+            customer_id=customer_scope_id,
+        )
+
+        if ticket_data and ticket_data.get("access_denied"):
+            return _build_access_denied(ticket_number)
+
+        if not ticket_data:
+            # Local DB fallback
+            local_cid = self._resolve_local_customer_scope(customer_id, tenant_id, registration)
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id, customer_id=local_cid)
+            if not ticket:
+                return _text_reply(
+                    f'\u274C Ticket `{ticket_number}` was not found.\n\n'
+                    'Please check the number and try again.\n\n'
+                    'Send *0* to return to the View Tickets menu.'
+                )
+            result = _build_ticket_status({
+                'ticket_number': ticket.ticket_number,
+                'status': ticket.status.upper(),
+                'title': ticket.subject,
+                'category': ticket.category,
+                'created_at': str(ticket.created_at),
+            })
+        else:
+            result = _build_ticket_status(ticket_data)
+
+        # After viewing details, return to the View Tickets menu.
+        # Note: _build_ticket_status already includes a "Send 0" return
+        # instruction, so we do not add another footer here.
+        session.state = 'MY_TICKETS_MENU'
+        return result
 
     def _handle_my_tickets_list(
         self, session: WhatsappSession, text: str, tenant_id: uuid.UUID, customer_id: uuid.UUID | None
@@ -1367,6 +1577,12 @@ class ConversationService:
         """Look up a single ticket by number and show its details."""
         ticket_number = text.strip().upper()
 
+        # Attach the registered user / customer so the backend enforces scoping.
+        registration = self._get_registered_user(session, tenant_id)
+        user_id, customer_scope_id = self._resolve_access_params(
+            session, customer_id, tenant_id, registration
+        )
+
         helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
         if customer_id is not None:
             customer = self.customers.get(customer_id)
@@ -1386,10 +1602,19 @@ class ConversationService:
         ticket_data = self.helpdesk_api.get_ticket_status(
             ticket_number=ticket_number,
             tenant_id=helpdesk_tenant_id,
+            user_id=user_id,
+            customer_id=customer_scope_id,
         )
 
+        # User typed a ticket number they do not have access to.
+        if ticket_data and ticket_data.get("access_denied"):
+            return _build_access_denied(ticket_number)
+
         if not ticket_data:
-            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            # Local DB fallback — scope to the user's customer so a mistyped
+            # ticket number from another customer is not leaked.
+            local_cid = self._resolve_local_customer_scope(customer_id, tenant_id, registration)
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id, customer_id=local_cid)
             if not ticket:
                 return _text_reply(
                     f'\u274C Ticket `{ticket_number}` was not found.\n\n'
@@ -1482,6 +1707,9 @@ class ConversationService:
 
             session.ticket_draft = None
             session.state = 'MAIN_MENU'
+
+            if result and result.get("access_denied"):
+                return _build_access_denied(ticket_number)
 
             if result and result.get("success"):
                 return _text_reply(
@@ -1779,15 +2007,28 @@ class ConversationService:
             if registered_user and registered_user.helpdesk_tenant_id:
                 helpdesk_tenant_id = str(registered_user.helpdesk_tenant_id)
 
+        # Attach the registered user / customer so the backend enforces scoping.
+        registration = self._get_registered_user(session, tenant_id)
+        user_id, customer_scope_id = self._resolve_access_params(
+            session, customer_id, tenant_id, registration
+        )
+
         # Look up ticket via the real helpdesk backend
         ticket_data = self.helpdesk_api.get_ticket_status(
             ticket_number=ticket_number,
             tenant_id=helpdesk_tenant_id,
+            user_id=user_id,
+            customer_id=customer_scope_id,
         )
 
+        # User typed a ticket number they do not have access to.
+        if ticket_data and ticket_data.get("access_denied"):
+            return _build_access_denied(ticket_number)
+
         if not ticket_data:
-            # Fallback: try local database
-            ticket = self.tickets.get_by_number(ticket_number, tenant_id)
+            # Fallback: try local database (scoped to the user's customer)
+            local_cid = self._resolve_local_customer_scope(customer_id, tenant_id, registration)
+            ticket = self.tickets.get_by_number(ticket_number, tenant_id, customer_id=local_cid)
             if not ticket:
                 # Re-show the check ticket prompt with the error
                 return _text_reply(
