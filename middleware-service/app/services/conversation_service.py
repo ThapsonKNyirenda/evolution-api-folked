@@ -405,7 +405,7 @@ class ConversationService:
         cutoff = datetime.utcnow() - timedelta(minutes=SESSION_TIMEOUT_MINUTES)
         return session.last_activity < cutoff and session.state != 'MAIN_MENU'
 
-    def _check_user_registration(self, phone_number: str, tenant_id: uuid.UUID) -> dict | None:
+    def _check_user_registration(self, phone_number: str, tenant_id: uuid.UUID, enrich: bool = False) -> dict | None:
         """
         Check if the phone number is registered to a user account.
         
@@ -414,12 +414,16 @@ class ConversationService:
         This ensures that recently assigned phone numbers work immediately
         without waiting for the next sync cycle.
         
+        When enrich=True, also fetches customer_id, roles, and permissions from
+        the helpdesk API (even when found in local cache). This enables proper
+        role-based ticket scoping and customer affiliation for the chat bot.
+        
         Returns user info dict if registered, None if not registered.
         """
         try:
             registered_user = self.registered_users.get_by_phone_and_tenant(phone_number, tenant_id)
             if registered_user and registered_user.is_active:
-                return {
+                result = {
                     "is_registered": True,
                     "user_id": str(registered_user.helpdesk_user_id),
                     "phone_number": registered_user.phone_number,
@@ -430,7 +434,33 @@ class ConversationService:
                     "display_name": registered_user.display_name,
                     "is_active": registered_user.is_active,
                     "tenant_id": str(registered_user.helpdesk_tenant_id or registered_user.tenant_id),
+                    "customer_id": None,
+                    "roles": [],
+                    "permissions": [],
                 }
+
+                # If enrichment requested, fetch full details from helpdesk API
+                if enrich:
+                    try:
+                        helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
+                        enriched = self.helpdesk_api.check_user_registration(
+                            phone_number=phone_number,
+                            tenant_id=helpdesk_tenant_id,
+                        )
+                        if enriched and enriched.get("is_registered"):
+                            result["customer_id"] = enriched.get("customer_id")
+                            result["roles"] = enriched.get("roles", [])
+                            result["permissions"] = enriched.get("permissions", [])
+                            logger.debug(
+                                "Enriched user registration for %s: customer_id=%s, roles=%s",
+                                phone_number, result["customer_id"], result["roles"],
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to enrich user registration for %s: %s", phone_number, e
+                        )
+
+                return result
 
             # Fallback: check helpdesk API directly (in case sync hasn't run yet)
             helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
@@ -463,7 +493,22 @@ class ConversationService:
                         "Failed to create local registered_user from helpdesk fallback: %s", e
                     )
 
-                return helpdesk_result
+                # API response now includes customer_id, roles, permissions
+                return {
+                    "is_registered": True,
+                    "user_id": str(helpdesk_result["user_id"]),
+                    "phone_number": helpdesk_result.get("phone_number", phone_number),
+                    "username": helpdesk_result.get("username"),
+                    "email": helpdesk_result.get("email"),
+                    "first_name": helpdesk_result.get("first_name"),
+                    "last_name": helpdesk_result.get("last_name"),
+                    "display_name": helpdesk_result.get("display_name"),
+                    "is_active": helpdesk_result.get("is_active", True),
+                    "tenant_id": str(helpdesk_result.get("tenant_id", tenant_id)),
+                    "customer_id": helpdesk_result.get("customer_id"),
+                    "roles": helpdesk_result.get("roles", []),
+                    "permissions": helpdesk_result.get("permissions", []),
+                }
 
             return None
         except Exception as e:
@@ -476,7 +521,7 @@ class ConversationService:
 
     def _sync_customer_with_helpdesk(
         self, phone_number: str, tenant_id: uuid.UUID
-    ) -> bool:
+    ) -> dict:
         """
         Look up the customer in the main helpdesk system by phone number.
         Tries multiple phone number formats (with/without country code).
@@ -486,8 +531,10 @@ class ConversationService:
         be created through the main helpdesk portal.
 
         Returns:
-            True if a matching helpdesk customer was found (or already linked),
-            False if the phone number is not registered as a customer.
+            dict with keys:
+            - "found": bool - True if a matching helpdesk customer was found
+            - "customer_id": UUID | None - The helpdesk customer ID if found
+            - "already_linked": bool - True if local customer already linked
         """
         try:
             # Skip API call if local customer is already linked to helpdesk
@@ -495,7 +542,11 @@ class ConversationService:
                 phone_number, tenant_id
             )
             if existing_local and existing_local.helpdesk_customer_id:
-                return True
+                return {
+                    "found": True,
+                    "customer_id": existing_local.helpdesk_customer_id,
+                    "already_linked": True,
+                }
 
             helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
 
@@ -544,13 +595,21 @@ class ConversationService:
                             "Failed to update phone registry helpdesk ID: %s",
                             reg_err,
                         )
-                return True
+                return {
+                    "found": True,
+                    "customer_id": uuid.UUID(helpdesk_id) if isinstance(helpdesk_id, str) else helpdesk_id,
+                    "already_linked": False,
+                }
 
             logger.info(
                 "No helpdesk customer found for phone %s (tried %d variants)",
                 phone_number, len(phone_variations)
             )
-            return False
+            return {
+                "found": False,
+                "customer_id": None,
+                "already_linked": False,
+            }
 
         except Exception as e:
             logger.warning(
@@ -558,8 +617,13 @@ class ConversationService:
                 e,
                 phone_number,
             )
-            # If we can't verify (API error etc.), block to be safe
-            return False
+            # If we can't verify (API error etc.), allow through to be safe
+            return {
+                "found": False,
+                "customer_id": None,
+                "already_linked": False,
+                "error": str(e),
+            }
 
     @staticmethod
     def _normalize_phone_variations(phone_number: str) -> list[str]:
@@ -607,18 +671,41 @@ class ConversationService:
         tenant_id = link.tenant_id
 
         # Check if user is registered in helpdesk FIRST — this determines
-        # whether we treat them as a customer or a registered user (agent).
-        registration = self._check_user_registration(phone_number, tenant_id)
+        # whether we treat them as a customer or a registered user (agent/customer contact).
+        # Use enrich=True to also fetch customer_id, roles, and permissions for
+        # proper role-based ticket scoping (same as the main helpdesk portal).
+        registration = self._check_user_registration(phone_number, tenant_id, enrich=True)
 
         customer = None
         customer_id = None
 
         if registration:
-            # Registered user (helpdesk agent) — do NOT force-create a Customer record.
-            # Just register the phone in the registry without a customer link.
-            # Do NOT call _sync_customer_with_helpdesk — that would auto-create
-            # a customer in the helpdesk system, which we don't want for agents.
-            self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
+            # Registered user (helpdesk agent or customer contact).
+            # Check if this user is also a customer contact — if so, link them
+            # to their customer so the local DB fallback can properly scope tickets.
+            reg_customer_id = registration.get("customer_id")
+            if reg_customer_id:
+                # User is a customer contact — link to their customer in phone registry
+                # and set customer_id for local DB fallback in ticket listing.
+                try:
+                    customer_id_uuid = uuid.UUID(str(reg_customer_id))
+                    self.phone_registry.get_or_create(
+                        phone_number, tenant_id, customer_id=customer_id_uuid
+                    )
+                    customer_id = customer_id_uuid
+                    logger.debug(
+                        "Registered user %s is a customer contact (customer_id=%s)",
+                        registration.get("user_id"), customer_id,
+                    )
+                except (ValueError, AttributeError) as e:
+                    logger.warning(
+                        "Invalid customer_id for registered user %s: %s",
+                        registration.get("user_id"), e,
+                    )
+            else:
+                # Pure agent/admin — no customer affiliation
+                self.phone_registry.get_or_create(phone_number, tenant_id, customer_id=None)
+                customer_id = None
         else:
             # Not registered as an agent — create a local customer record for
             # conversation tracking only. Then try to link it to an existing
@@ -635,10 +722,11 @@ class ConversationService:
 
             # Sync (read-only) with helpdesk to link local customer to any
             # existing helpdesk customer record. Tries multiple phone formats.
+            sync_result = self._sync_customer_with_helpdesk(phone_number, tenant_id)
+            
             # If no matching customer is found in the main helpdesk, block
-            # the conversation — the number must be registered first.
-            found = self._sync_customer_with_helpdesk(phone_number, tenant_id)
-            if not found:
+            # the conversation — the number must be registered as a customer first.
+            if not sync_result.get("found"):
                 logger.info(
                     "Blocked unregistered phone %s for tenant %s",
                     phone_number, tenant_id,
@@ -1150,14 +1238,19 @@ class ConversationService:
 
         skip = (current_page - 1) * per_page
 
-        # Determine user_id and registration status
+        # Determine user_id and registration status.
+        # Use enrich=True to get customer_id for proper ticket scoping,
+        # matching the main helpdesk portal's role-based visibility rules.
         user_id = None
-        registration = self._check_user_registration(session.phone_number, tenant_id)
+        user_customer_id = None
+        registration = self._check_user_registration(session.phone_number, tenant_id, enrich=True)
         if registration:
-            user_id = registration["user_id"]
+            user_id = registration.get("user_id")
+            user_customer_id = registration.get("customer_id")
 
         if user_id:
             # Registered user (agent or customer contact) — use helpdesk API
+            # which now applies proper role-based ticket scoping (matching the portal).
             helpdesk_tenant_id = self._resolve_helpdesk_tenant_id(tenant_id)
             result = self.helpdesk_api.get_my_tickets(
                 user_id=user_id,
@@ -1168,6 +1261,43 @@ class ConversationService:
             )
             tickets = result.get("tickets", [])
             total = result.get("total", 0)
+
+            # If API returns no tickets and the user is a customer contact,
+            # fall back to local DB for resilience (the local DB may have
+            # tickets that were synced but not yet visible via the API).
+            if not tickets and user_customer_id:
+                logger.info(
+                    "API returned no tickets for user %s, falling back to local DB with customer_id=%s",
+                    user_id, user_customer_id,
+                )
+                try:
+                    customer_id_uuid = uuid.UUID(str(user_customer_id))
+                    tickets_raw = self.tickets.list_all(
+                        tenant_id=tenant_id,
+                        customer_id=customer_id_uuid,
+                        limit=per_page + 1,
+                        offset=skip,
+                    )
+                    has_more = len(tickets_raw) > per_page
+                    tickets = []
+                    page_tickets = tickets_raw[:per_page]
+                    for t in page_tickets:
+                        t_status = t.status.upper() if t.status else "UNKNOWN"
+                        if status_filter and t_status.lower() != status_filter.lower():
+                            continue
+                        tickets.append({
+                            "ticket_number": t.ticket_number,
+                            "title": t.subject or t.title,
+                            "status": t_status,
+                            "priority": None,
+                            "category": t.category,
+                            "created_at": str(t.created_at) if t.created_at else None,
+                            "updated_at": str(t.updated_at) if t.updated_at else None,
+                        })
+                    total = (current_page - 1) * per_page + len(tickets) + (per_page if has_more else 0)
+                except Exception as e:
+                    logger.error("Local DB fallback failed for user %s: %s", user_id, e)
+
         elif customer_id is not None:
             # Anonymous customer — use local DB as fallback.
             # Query per_page+1 to detect whether a next page exists.
