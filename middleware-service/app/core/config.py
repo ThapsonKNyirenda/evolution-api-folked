@@ -40,10 +40,9 @@ class Settings(BaseSettings):
     # always sent too (honoured by the backend only if header fallback is enabled).
     helpdesk_tenant_domain_suffix: str = ''
 
-    # Shared secret used ONLY to validate admin JWTs on this middleware's own
-    # management API (/api/v1/tenants, /instances, ...). Must be provided via env.
-    secret_key: str = ''
-    algorithm: str = 'HS256'
+    # Operator key for this middleware's own management API (X-Admin-Key header).
+    # Required; management endpoints return 503 while it is empty.
+    admin_api_key: str = ''
 
     def tenant_api_keys(self) -> dict[str, str]:
         import json
