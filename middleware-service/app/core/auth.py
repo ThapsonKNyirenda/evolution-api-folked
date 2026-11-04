@@ -38,6 +38,14 @@ def get_token_payload(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    if not settings.secret_key:
+        # Never validate against an empty HMAC key.
+        logger.error("SECRET_KEY is not configured; rejecting authenticated request")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured",
+        )
+
     token = credentials.credentials
     try:
         payload = jwt.decode(

@@ -51,6 +51,9 @@ async def start_consumer(rabbitmq: RabbitMQService):
                     push_name=parsed.get('push_name'),
                 )
 
+                if reply is None:
+                    return
+
                 evo = EvolutionAPIService()
                 try:
                     await evo.send_message(instance_name, parsed.get('recipient') or parsed['customer_phone_number'], reply)

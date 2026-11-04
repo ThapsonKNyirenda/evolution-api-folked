@@ -9,8 +9,8 @@ class TenantRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def create(self, name: str, helpdesk_tenant_id: uuid.UUID | None = None) -> Tenant:
-        tenant = Tenant(name=name, helpdesk_tenant_id=helpdesk_tenant_id)
+    def create(self, name: str, helpdesk_tenant_slug: str | None = None) -> Tenant:
+        tenant = Tenant(name=name, helpdesk_tenant_slug=helpdesk_tenant_slug)
         self.db.add(tenant)
         self.db.commit()
         self.db.refresh(tenant)
@@ -22,8 +22,8 @@ class TenantRepository:
     def get_by_name(self, name: str) -> Tenant | None:
         return self.db.query(Tenant).filter(Tenant.name == name).first()
 
-    def get_by_helpdesk_id(self, helpdesk_id: uuid.UUID) -> Tenant | None:
-        return self.db.query(Tenant).filter(Tenant.helpdesk_tenant_id == helpdesk_id).first()
+    def get_by_helpdesk_slug(self, slug: str) -> Tenant | None:
+        return self.db.query(Tenant).filter(Tenant.helpdesk_tenant_slug == slug).first()
 
     def list_all(self, limit: int = 50, offset: int = 0) -> list[Tenant]:
         return self.db.query(Tenant).order_by(Tenant.created_at.desc()).offset(offset).limit(limit).all()

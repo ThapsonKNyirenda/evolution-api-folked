@@ -24,24 +24,36 @@ class Settings(BaseSettings):
 
     support_whatsapp_number: str = ''
     default_tenant_name: str = ''
+    default_tenant_slug: str = ''
     default_instance_name: str = ''
 
-    # Helpdesk backend API configuration
-    helpdesk_api_base_url: str = 'http://host.containers.internal:8000'
-    helpdesk_api_key: str = ''
+    # Helpdesk backend API configuration (schema-per-tenant, /api/v2).
+    # Base URL must include the version prefix, e.g. http://helpdesk:8000/api/v2
+    helpdesk_api_base_url: str = 'http://host.containers.internal:8000/api/v2'
     helpdesk_api_timeout: int = 30
-    helpdesk_default_tenant_id: str = ''
+    # JSON object mapping helpdesk tenant slug -> that tenant's integration API key
+    # (generated in the helpdesk: POST /api/v2/integration/api-key, scopes read,write).
+    # Keys are bound to a single tenant by the backend, so there is no shared key.
+    helpdesk_tenant_api_keys: str = '{}'
+    # Production resolves tenants by Host subdomain. When set (e.g. ".mitra.mw"),
+    # requests carry X-Forwarded-Host: <slug><suffix>. The X-Tenant-ID header is
+    # always sent too (honoured by the backend only if header fallback is enabled).
+    helpdesk_tenant_domain_suffix: str = ''
 
-    # Shared authentication with main helpdesk system
-    # Uses the same SECRET_KEY and ALGORITHM as the main helpdesk for JWT token generation
-    secret_key: str = 'X0FZ0-_XAhFD9zCHZLZk6ePIvAL7WyyojU4L0Xm3-8Y'
+    # Shared secret used ONLY to validate admin JWTs on this middleware's own
+    # management API (/api/v1/tenants, /instances, ...). Must be provided via env.
+    secret_key: str = ''
     algorithm: str = 'HS256'
-    helpdesk_jwt_enabled: bool = True
-    helpdesk_service_username: str = 'whatsapp-middleware'
 
-    # Periodic sync configuration
-    sync_interval_minutes: int = 15
-    """How often to run the background sync (tenants, customers, tickets, registered_users)."""
+    def tenant_api_keys(self) -> dict[str, str]:
+        import json
+        try:
+            data = json.loads(self.helpdesk_tenant_api_keys or '{}')
+        except ValueError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k).strip().lower(): str(v) for k, v in data.items() if k and v}
 
 
 settings = Settings()
