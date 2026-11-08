@@ -98,7 +98,15 @@ def _build_main_menu() -> dict:
     )
 
 
-def _build_category_list() -> dict:
+def _build_category_list(names: list[str] | None = None) -> dict:
+    if names:
+        lines = '\n'.join(f'{i}\ufe0f\u20e3 {n}' if i < 10 else f'{i}. {n}' for i, n in enumerate(names, 1))
+        return _text_reply(
+            '📁 *Select a Category*\n\n'
+            'Please reply with the number of your category:\n\n'
+            f'{lines}\n\n'
+            'Send *0* at any time to return to the main menu.'
+        )
     return _text_reply(
         '📁 *Select a Category*\n\n'
         'Please reply with the number of your category:\n\n'
@@ -435,6 +443,16 @@ class ConversationService:
                 logger.warning('Failed to check user registration: %s (phone=%s)', e, phone_number)
         self._registration_cache[key] = result
         return result
+
+    def _tenant_categories(self, session: WhatsappSession) -> list[str] | None:
+        slug = self._tenant_slug(session.tenant_id)
+        if not slug:
+            return None
+        try:
+            return self.helpdesk_api.get_categories(slug)
+        except Exception as e:
+            logger.warning('Failed to load tenant categories: %s', e)
+            return None
 
     def _registered_user_id(self, phone_number: str, tenant_id: uuid.UUID) -> str | None:
         registration = self._check_user_registration(phone_number, tenant_id)
@@ -1139,9 +1157,12 @@ class ConversationService:
 
         draft = dict(session.ticket_draft or {})
         draft['description'] = text
+        # Offer this tenant's own categories (fixed list only if the helpdesk can't be asked).
+        names = self._tenant_categories(session)
+        draft['_categories'] = names or []
         session.ticket_draft = draft
         session.state = 'WAITING_CATEGORY'
-        return _build_category_list()
+        return _build_category_list(names)
 
     def _handle_category(self, session: WhatsappSession, text: str) -> dict:
         if _is_cancel(text):
@@ -1150,20 +1171,27 @@ class ConversationService:
             return _cancel_reply()
 
         normalized = text.strip().lower()
-
-        category_map = {
-            '1': 'Network', 'cat_network': 'Network', 'network': 'Network',
-            '2': 'Billing', 'cat_billing': 'Billing', 'billing': 'Billing',
-            '3': 'Technical Support', 'cat_tech': 'Technical Support',
-            'technical support': 'Technical Support', 'tech': 'Technical Support',
-            '4': 'Other', 'cat_other': 'Other', 'other': 'Other',
-        }
-
-        category = category_map.get(normalized)
-        if not category:
-            return _build_category_list()
-
         draft = dict(session.ticket_draft or {})
+        names = draft.get('_categories') or []
+
+        if names:
+            by_name = {n.lower(): n for n in names}
+            if normalized.isdigit() and 1 <= int(normalized) <= len(names):
+                category = names[int(normalized) - 1]
+            else:
+                category = by_name.get(normalized)
+        else:
+            category_map = {
+                '1': 'Network', 'cat_network': 'Network', 'network': 'Network',
+                '2': 'Billing', 'cat_billing': 'Billing', 'billing': 'Billing',
+                '3': 'Technical Support', 'cat_tech': 'Technical Support',
+                'technical support': 'Technical Support', 'tech': 'Technical Support',
+                '4': 'Other', 'cat_other': 'Other', 'other': 'Other',
+            }
+            category = category_map.get(normalized)
+        if not category:
+            return _build_category_list(names or None)
+
         draft['category'] = category
         session.ticket_draft = draft
         session.state = 'WAITING_CC_EMAILS'
@@ -1283,6 +1311,18 @@ class ConversationService:
                 session.ticket_draft = None
                 session.state = 'MAIN_MENU'
                 return _build_ticket_created(ticket_data)
+
+            # The helpdesk answered but refused the ticket (e.g. subscription required):
+            # tell the user why instead of calling the system unavailable.
+            if self.helpdesk_api.last_error:
+                session.ticket_draft = None
+                session.state = 'MAIN_MENU'
+                return _text_reply(
+                    '❌ *Ticket Could Not Be Created*\n\n'
+                    f'{self.helpdesk_api.last_error}\n\n'
+                    'Please contact your administrator if you think this is a mistake.\n\n'
+                    'Send *0* to return to the main menu.'
+                )
 
             # Fallback: if helpdesk API fails, use local database
             if customer_id is None:

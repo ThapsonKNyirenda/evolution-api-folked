@@ -44,6 +44,7 @@ class FakeHelpdesk:
         self.users = {'alpha': {PHONE: str(uuid.uuid4())}, 'beta': {}}
         self.tickets = {'alpha': [], 'beta': []}
         self.calls = []
+        self.refuse = False
 
     def __call__(self, method, url, params=None, json=None, headers=None, timeout=None):
         slug = headers.get('X-Tenant-ID')
@@ -58,7 +59,12 @@ class FakeHelpdesk:
             if uid:
                 body.update(user_id=uid, full_name='Test User')
             return httpx.Response(200, json=body)
+        if path == '/categories':
+            cats = {'alpha': ['Incident', 'General Inquiry'], 'beta': ['Billing Issue']}[slug]
+            return httpx.Response(200, json={'categories': [{'name': c} for c in cats]})
         if path == '/tickets' and method == 'POST':
+            if self.refuse:
+                return httpx.Response(400, json={'detail': 'An active subscription is required to create a ticket'})
             n = f'{slug.upper()}-{len(self.tickets[slug]) + 1:05d}'
             t = {'id': str(uuid.uuid4()), 'ticket_number': n, 'title': json['title'], 'status': 'open',
                  'category': json.get('category'), 'priority': 'medium', 'created_at': '2026-11-04T10:00:00',
@@ -201,3 +207,23 @@ def test_domain_suffix_adds_forwarded_host(env, monkeypatch):
     monkeypatch.setattr(httpx, 'request', spy)
     say(db, 'inst-alpha', '1')
     assert seen['X-Forwarded-Host'] == 'alpha.mitra.mw'
+
+
+def test_category_menu_uses_tenant_categories_and_ticket_carries_name(env):
+    db, fake = env
+    say(db, 'inst-alpha', '1')
+    say(db, 'inst-alpha', 'Printer is down')
+    menu = say(db, 'inst-alpha', 'details')
+    assert 'Incident' in menu['text'] and 'General Inquiry' in menu['text'] and 'Billing' not in menu['text']
+    say(db, 'inst-alpha', '2')   # General Inquiry
+    say(db, 'inst-alpha', 'skip')
+    say(db, 'inst-alpha', '1')
+    assert fake.tickets['alpha'][0]['category'] == 'General Inquiry'
+
+
+def test_helpdesk_refusal_reason_is_shown_not_called_unavailable(env):
+    db, fake = env
+    fake.refuse = True
+    reply = create_ticket_flow(db, 'inst-alpha')
+    assert 'subscription is required' in reply['text']
+    assert 'unavailable' not in reply['text'].lower()

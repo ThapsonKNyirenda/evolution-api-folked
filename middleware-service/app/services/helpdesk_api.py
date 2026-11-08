@@ -55,6 +55,8 @@ class HelpdeskAPIClient:
     def __init__(self):
         self.base_url = settings.helpdesk_api_base_url.rstrip('/')
         self.timeout = settings.helpdesk_api_timeout
+        # Reason the helpdesk gave for the most recent refused (4xx) write, else None.
+        self.last_error: str | None = None
 
     # ── Request plumbing ───────────────────────────────────
 
@@ -130,6 +132,18 @@ class HelpdeskAPIClient:
             data['display_name'] = data.get('full_name')
         return data
 
+    # ── Categories ─────────────────────────────────────────
+
+    def get_categories(self, tenant_slug: str) -> list[str] | None:
+        """Active ticket category names for the tenant, or None if unavailable."""
+        response = self._request('GET', '/categories', tenant_slug)
+        if response is None or response.status_code != 200:
+            if response is not None:
+                self._log_http_error('fetching categories', response)
+            return None
+        names = [c.get('name') for c in response.json().get('categories', []) if c.get('name')]
+        return names or None
+
     # ── Tickets ────────────────────────────────────────────
 
     def create_ticket(
@@ -150,11 +164,19 @@ class HelpdeskAPIClient:
             'cc_emails': cc_emails or None,
         }
         payload = {k: v for k, v in payload.items() if v is not None}
+        self.last_error = None
         response = self._request('POST', '/tickets', tenant_slug, json=payload)
         if response is None:
             return None
         if response.status_code not in (200, 201):
             self._log_http_error('creating ticket', response)
+            if 400 <= response.status_code < 500:
+                try:
+                    detail = response.json().get('detail')
+                except ValueError:
+                    detail = None
+                if isinstance(detail, str) and detail.strip():
+                    self.last_error = detail.strip()[:200]
             return None
         result = _normalize_ticket(response.json())
         logger.info('Helpdesk ticket created: #%s (tenant=%s)', result.get('ticket_number', '?'), tenant_slug)
