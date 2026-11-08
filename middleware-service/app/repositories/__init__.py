@@ -3,6 +3,7 @@ from app.repositories.customer import CustomerRepository
 from app.repositories.event_log import EventLogRepository
 from app.repositories.instance_tenant import InstanceTenantRepository
 from app.repositories.phone_registry import PhoneRegistryRepository
+from app.repositories.processed_message import ProcessedMessageRepository
 from app.repositories.registered_user import RegisteredUserRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.ticket import TicketRepository
@@ -16,6 +17,7 @@ __all__ = [
     'EventLogRepository',
     'InstanceTenantRepository',
     'PhoneRegistryRepository',
+    'ProcessedMessageRepository',
     'RegisteredUserRepository',
     'TenantRepository',
     'TicketCommentRepository',

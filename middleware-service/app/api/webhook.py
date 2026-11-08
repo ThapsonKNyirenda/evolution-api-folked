@@ -88,6 +88,9 @@ async def receive_evolution_webhook(request: Request, db: Session = Depends(get_
             push_name=push_name,
         )
 
+        if reply is None:
+            return {'status': 'ignored', 'reason': 'duplicate_message'}
+
         # Send the reply back via Evolution API
         evo = EvolutionAPIService()
         try:
@@ -129,6 +132,9 @@ async def receive_raw_evolution_event(
         message_id=message_id,
         push_name=None,
     )
+
+    if reply is None:
+        return {'status': 'ignored', 'reason': 'duplicate_message'}
 
     evo = EvolutionAPIService()
     try:

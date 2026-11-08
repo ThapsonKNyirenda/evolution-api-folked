@@ -5,7 +5,7 @@ Standalone FastAPI microservice that bridges WhatsApp (via Evolution API) to a h
 ## Architecture
 
 ```
-WhatsApp User → Evolution API → HTTP Webhook / RabbitMQ → Middleware Service → Helpdesk DB
+WhatsApp User → Evolution API → HTTP Webhook / RabbitMQ → Middleware Service → Helpdesk API (/api/v2, per-tenant)
                                                                     ↓
                                                              Evolution API ← Send reply
 ```
@@ -14,7 +14,7 @@ WhatsApp User → Evolution API → HTTP Webhook / RabbitMQ → Middleware Servi
 
 - **Tenant** — A company/brand receiving support requests (e.g., "Company A")
 - **Customer** — A person sending WhatsApp messages, scoped to a tenant
-- **Instance-Tenant Link** — Maps a WhatsApp instance name to a tenant
+- **Instance-Tenant Link** — Maps a WhatsApp instance name to a tenant. Each middleware tenant carries a `helpdesk_tenant_slug` (the helpdesk's `ft_tenants.identifier`); that slug plus the tenant's own integration API key is the only tenant context the helpdesk receives. The helpdesk resolves the schema, enforces isolation and applies the user's ticket visibility rules.
 - **WhatsApp Session** — Per-phone per-tenant conversation state machine
 - **Ticket** — Support ticket with subject, description, category, status
 
@@ -104,8 +104,14 @@ The API will be available at `http://localhost:8090`.
 ```bash
 curl -X POST http://localhost:8090/api/v1/tenants \
   -H 'Content-Type: application/json' \
-  -d '{"name": "Acme Corp"}'
+  -d '{"name": "Acme Corp", "helpdesk_tenant_slug": "acme"}'
 ```
+
+### 1b. Give the middleware that tenant's helpdesk API key
+
+In the helpdesk, a tenant admin generates the key (`POST /api/v2/integration/api-key?scopes=read,write`), then add it to
+`HELPDESK_TENANT_API_KEYS` (JSON map slug → key) and restart. Staff/customers are matched by the phone number on their
+helpdesk user profile (digits-only comparison, must be unique within the tenant).
 
 ### 2. Create a WhatsApp Instance in Evolution API
 
@@ -141,6 +147,14 @@ When a user sends a WhatsApp message, the middleware will:
 3. Start/continue a conversation session
 4. Guide the user through ticket creation
 5. Send replies back via Evolution API
+
+## Tests
+
+```bash
+python -m pytest tests -q   # offline: SQLite + fake helpdesk, covers tenant isolation, retries, fail-closed cases
+```
+
+Existing databases: apply `migrations/002_schema_per_tenant_support.sql`, then set `tenants.helpdesk_tenant_slug`.
 
 ## Conversation Flow
 

@@ -1,788 +1,262 @@
 """
-Helpdesk Backend API Client
+Helpdesk Backend API Client (schema-per-tenant, ``/api/v2``)
 
-HTTP client that connects the middleware service to the real helpdesk backend.
-Supports both API-key and JWT authentication (JWT uses the shared SECRET_KEY).
-Provides methods for customer sync, ticket operations, and health checks.
+The helpdesk backend is the single authority for tenant resolution, schema
+selection and data isolation. This client therefore never touches database
+schemas: for every call it names the tenant by its *slug* and authenticates with
+that tenant's own integration API key (``X-API-Key``). The backend rejects a key
+that does not belong to the resolved tenant, so a request can never reach
+another tenant's data even if the wrong slug were supplied.
+
+Endpoints used (all under ``/integration/whatsapp``):
+  GET  /users/by-phone                       resolve a WhatsApp number to a tenant user
+  GET  /tickets                              tickets visible to a user
+  GET  /tickets/by-number/{n}                one ticket, if visible to the user
+  POST /tickets                              create a ticket as the user
+  POST /tickets/by-number/{n}/comments       comment as the user
+
+Every method returns ``None`` / an empty result on failure (logged without
+secrets) so the conversation flow can degrade gracefully.
 """
 
 import logging
-from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
-import jwt
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_PREFIX = '/integration/whatsapp'
+
+
+class TenantNotConfiguredError(Exception):
+    """Raised when a tenant has no slug or no API key configured."""
+
+
+def _display_status(value: str | None) -> str:
+    return (value or 'unknown').replace('_', ' ').upper()
+
+
+def _normalize_ticket(t: dict[str, Any]) -> dict[str, Any]:
+    out = dict(t)
+    out['status'] = _display_status(t.get('status'))
+    if t.get('priority'):
+        out['priority'] = str(t['priority']).replace('_', ' ').title()
+    return out
 
 
 class HelpdeskAPIClient:
     """Client for the helpdesk backend WhatsApp integration API."""
 
     def __init__(self):
-        self.base_url = settings.helpdesk_api_base_url.rstrip("/")
-        self.api_key = settings.helpdesk_api_key
+        self.base_url = settings.helpdesk_api_base_url.rstrip('/')
         self.timeout = settings.helpdesk_api_timeout
-        self.default_tenant_id = settings.helpdesk_default_tenant_id
-        self._jwt_token: str | None = None
-        self._jwt_expiry: datetime | None = None
+        # Reason the helpdesk gave for the most recent refused (4xx) write, else None.
+        self.last_error: str | None = None
 
-        if not self.api_key:
-            logger.warning(
-                "HELPDESK_API_KEY is not set! Middleware will not be able to "
-                "authenticate with the helpdesk backend."
-            )
+    # ── Request plumbing ───────────────────────────────────
 
-    # ── Authentication ─────────────────────────────────────
-
-    def _generate_jwt_token(self) -> str:
-        """Generate a JWT token using the shared SECRET_KEY for helpdesk API auth."""
-        now = datetime.utcnow()
-        payload = {
-            "sub": settings.helpdesk_service_username,
-            "user": {
-                "id": str(settings.helpdesk_service_username),
-                "email": f"{settings.helpdesk_service_username}@middleware.local",
-                "username": settings.helpdesk_service_username,
-                "tenant_id": self.default_tenant_id,
-                "type": "service",
-            },
-            "iat": now,
-            "exp": now + timedelta(hours=1),
+    def _headers(self, tenant_slug: str) -> dict[str, str]:
+        slug = (tenant_slug or '').strip().lower()
+        if not slug:
+            raise TenantNotConfiguredError('tenant slug is empty')
+        api_key = settings.tenant_api_keys().get(slug)
+        if not api_key:
+            raise TenantNotConfiguredError(f'no helpdesk API key configured for tenant "{slug}"')
+        headers = {
+            'Content-Type': 'application/json',
+            'X-API-Key': api_key,
+            'X-Tenant-ID': slug,
         }
-        return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
-
-    def _get_jwt_token(self) -> str:
-        """Get a valid JWT token, generating a new one if expired."""
-        if not self._jwt_token or not self._jwt_expiry or datetime.utcnow() >= self._jwt_expiry:
-            self._jwt_token = self._generate_jwt_token()
-            self._jwt_expiry = datetime.utcnow() + timedelta(minutes=55)
-        return self._jwt_token
-
-    def _headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-
-        # Prefer JWT auth if enabled, fall back to API key
-        if settings.helpdesk_jwt_enabled:
-            headers["Authorization"] = f"Bearer {self._get_jwt_token()}"
-        elif self.api_key:
-            headers["X-API-Key"] = self.api_key
-
+        suffix = settings.helpdesk_tenant_domain_suffix.strip()
+        if suffix:
+            headers['X-Forwarded-Host'] = f'{slug}{suffix}'
         return headers
 
-    def _tenant_id(self, tenant_id: str | UUID | None = None) -> str:
-        """Resolve tenant ID from argument or default."""
-        if tenant_id:
-            return str(tenant_id)
-        if self.default_tenant_id:
-            return self.default_tenant_id
-        raise ValueError(
-            "No tenant_id provided and HELPDESK_DEFAULT_TENANT_ID is not configured"
+    def _request(
+        self,
+        method: str,
+        path: str,
+        tenant_slug: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response | None:
+        """Perform a tenant-scoped request. Returns None on transport/config errors."""
+        try:
+            headers = self._headers(tenant_slug)
+            return httpx.request(
+                method,
+                f'{self.base_url}{_PREFIX}{path}',
+                params=params,
+                json=json,
+                headers=headers,
+                timeout=self.timeout,
+            )
+        except TenantNotConfiguredError as e:
+            logger.error('Helpdesk call blocked: %s', e)
+        except httpx.RequestError as e:
+            logger.error('Helpdesk API request error (%s %s): %s', method, path, e)
+        return None
+
+    @staticmethod
+    def _log_http_error(action: str, response: httpx.Response) -> None:
+        # Body is truncated and never includes request headers/keys.
+        logger.error(
+            'Helpdesk API error %s (status %s): %s',
+            action, response.status_code, response.text[:300],
         )
 
-    # ── Customer Operations ────────────────────────────────
+    # ── User registration ──────────────────────────────────
 
-    def lookup_customer_by_phone(
-        self,
-        phone_number: str,
-        tenant_id: str | UUID | None = None,
-    ) -> dict[str, Any] | None:
+    def check_user_registration(self, phone_number: str, tenant_slug: str) -> dict[str, Any] | None:
         """
-        Look up a customer in the main helpdesk system by phone number.
-        Returns the customer data including id, tenant_id, name, etc., or None.
+        Resolve a phone number to an active user of the tenant.
+        Returns ``{'is_registered': bool, 'user_id': ..., ...}`` or ``None`` when the
+        backend could not be asked (callers treat that as "unknown", not "registered").
         """
-        url = f"{self.base_url}/api/v1/whatsapp/customers/lookup/phone"
-        params = {
-            "phone_number": phone_number,
-            "tenant_id": self._tenant_id(tenant_id),
-        }
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error looking up customer (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
+        response = self._request(
+            'GET', '/users/by-phone', tenant_slug, params={'phone_number': phone_number}
+        )
+        if response is None:
             return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error looking up customer: %s", e
-            )
+        if response.status_code != 200:
+            self._log_http_error('checking user registration', response)
             return None
+        data = response.json()
+        if data.get('is_registered') and data.get('user_id'):
+            data['display_name'] = data.get('full_name')
+        return data
 
-    def create_customer(
-        self,
-        tenant_id: str | UUID,
-        phone_number: str,
-        customer_name: str | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Create a customer record in the main helpdesk system for a WhatsApp user.
-        Returns the created customer data, or None on failure.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/customers"
-        payload = {
-            "tenant_id": self._tenant_id(tenant_id),
-            "phone_number": phone_number,
-            "customer_name": customer_name,
-        }
+    # ── Categories ─────────────────────────────────────────
 
-        try:
-            response = httpx.post(
-                url,
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            result = response.json()
-            logger.info(
-                "Helpdesk customer created/retrieved: id=%s phone=%s",
-                result.get("id", "?"),
-                phone_number,
-            )
-            return result
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error creating customer (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
+    def get_categories(self, tenant_slug: str) -> list[str] | None:
+        """Active ticket category names for the tenant, or None if unavailable."""
+        response = self._request('GET', '/categories', tenant_slug)
+        if response is None or response.status_code != 200:
+            if response is not None:
+                self._log_http_error('fetching categories', response)
             return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error creating customer: %s", e
-            )
-            return None
+        names = [c.get('name') for c in response.json().get('categories', []) if c.get('name')]
+        return names or None
 
-    def get_or_create_customer(
-        self,
-        tenant_id: str | UUID,
-        phone_number: str,
-        customer_name: str | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Look up a customer by phone number, creating one if not found.
-        This is the primary method to sync customers between middleware and helpdesk.
-        """
-        customer = self.lookup_customer_by_phone(phone_number, tenant_id)
-        if customer:
-            return customer
-        return self.create_customer(tenant_id, phone_number, customer_name)
-
-    # ── Ticket Operations ──────────────────────────────────
+    # ── Tickets ────────────────────────────────────────────
 
     def create_ticket(
         self,
-        tenant_id: str | UUID | None,
-        phone_number: str,
-        subject: str,
-        description: str | None = None,
-        category: str | None = None,
-        customer_name: str | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Create a ticket in the helpdesk backend.
-        Returns the created ticket data (including id and ticket_number), or None on failure.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets"
-        payload = {
-            "tenant_id": self._tenant_id(tenant_id),
-            "phone_number": phone_number,
-            "subject": subject,
-            "description": description,
-            "category": category,
-            "customer_name": customer_name,
-        }
-
-        try:
-            response = httpx.post(
-                url,
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            result = response.json()
-            logger.info(
-                "Helpdesk ticket created: #%s (id=%s) for %s",
-                result.get("ticket_number", "?"),
-                result.get("id", "?"),
-                phone_number,
-            )
-            return result
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error creating ticket (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error creating ticket: %s", e
-            )
-            return None
-        except Exception as e:
-            logger.error(
-                "Unexpected error creating helpdesk ticket: %s", e, exc_info=True
-            )
-            return None
-
-    def get_ticket_status(
-        self,
-        ticket_number: str,
-        tenant_id: str | UUID | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Get ticket status and details from the helpdesk backend.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/{ticket_number}"
-        params = {"tenant_id": self._tenant_id(tenant_id)}
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info("Ticket %s not found in helpdesk", ticket_number)
-                return None
-            logger.error(
-                "Helpdesk API error fetching ticket (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error fetching ticket: %s", e
-            )
-            return None
-
-    def lookup_tickets_by_phone(
-        self,
-        phone_number: str,
-        tenant_id: str | UUID | None = None,
-        limit: int = 10,
-    ) -> list[dict[str, Any]]:
-        """
-        Look up tickets by customer phone number.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/lookup/phone"
-        params = {
-            "phone_number": phone_number,
-            "tenant_id": self._tenant_id(tenant_id),
-            "limit": limit,
-        }
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("tickets", [])
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error looking up tickets (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return []
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error looking up tickets: %s", e
-            )
-            return []
-
-    def add_comment(
-        self,
-        ticket_number: str,
-        tenant_id: str | UUID | None,
-        phone_number: str,
-        message: str,
-        author_type: str = "customer",
-    ) -> dict[str, Any] | None:
-        """
-        Add a comment to a ticket.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/{ticket_number}/comments"
-        payload = {
-            "tenant_id": self._tenant_id(tenant_id),
-            "phone_number": phone_number,
-            "message": message,
-            "author_type": author_type,
-        }
-
-        try:
-            response = httpx.post(
-                url,
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info(
-                    "Ticket %s not found for adding comment", ticket_number
-                )
-                return None
-            logger.error(
-                "Helpdesk API error adding comment (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error adding comment: %s", e
-            )
-            return None
-
-    # ── Data Query Operations (pull data from helpdesk) ────
-
-    def list_tenants(
-        self,
-        page: int = 1,
-        per_page: int = 50,
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
-        """
-        Fetch tenants from the main helpdesk system.
-        Returns paginated tenant data.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tenants"
-        params = {
-            "page": page,
-            "per_page": per_page,
-            "include_deleted": str(include_deleted).lower(),
-        }
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error listing tenants (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return {"tenants": [], "total": 0, "page": page, "per_page": per_page}
-        except httpx.RequestError as e:
-            logger.error("Helpdesk API request error listing tenants: %s", e)
-            return {"tenants": [], "total": 0, "page": page, "per_page": per_page}
-
-    def list_customers(
-        self,
-        tenant_id: str | UUID | None = None,
-        page: int = 1,
-        per_page: int = 50,
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
-        """
-        Fetch customers from the main helpdesk system.
-        Can be filtered by tenant_id.
-        Returns paginated customer data.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/customers/list"
-        params: dict[str, Any] = {
-            "page": page,
-            "per_page": per_page,
-            "include_deleted": str(include_deleted).lower(),
-        }
-        if tenant_id:
-            params["tenant_id"] = self._tenant_id(tenant_id)
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error listing customers (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return {"customers": [], "total": 0, "page": page, "per_page": per_page}
-        except httpx.RequestError as e:
-            logger.error("Helpdesk API request error listing customers: %s", e)
-            return {"customers": [], "total": 0, "page": page, "per_page": per_page}
-
-    def list_tickets(
-        self,
-        tenant_id: str | UUID | None = None,
-        customer_id: str | UUID | None = None,
-        page: int = 1,
-        per_page: int = 50,
-    ) -> dict[str, Any]:
-        """
-        Fetch tickets from the main helpdesk system.
-        Can be filtered by tenant_id and/or customer_id.
-        Returns paginated ticket data.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/list-all"
-        params: dict[str, Any] = {
-            "page": page,
-            "per_page": per_page,
-        }
-        if tenant_id:
-            params["tenant_id"] = self._tenant_id(tenant_id)
-        if customer_id:
-            params["customer_id"] = str(customer_id)
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error listing tickets (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return {"tickets": [], "total": 0, "page": page, "per_page": per_page}
-        except httpx.RequestError as e:
-            logger.error("Helpdesk API request error listing tickets: %s", e)
-            return {"tickets": [], "total": 0, "page": page, "per_page": per_page}
-
-    def list_users(
-        self,
-        tenant_id: str | UUID,
-        page: int = 1,
-        per_page: int = 50,
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
-        """
-        Fetch internal users for a tenant from the main helpdesk system.
-        Used to refresh registered_users cached details.
-        Returns paginated user data.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/users/list"
-        params: dict[str, Any] = {
-            "tenant_id": self._tenant_id(tenant_id),
-            "page": page,
-            "per_page": per_page,
-            "include_deleted": str(include_deleted).lower(),
-        }
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error listing users (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return {"users": [], "total": 0, "page": page, "per_page": per_page}
-        except httpx.RequestError as e:
-            logger.error("Helpdesk API request error listing users: %s", e)
-            return {"users": [], "total": 0, "page": page, "per_page": per_page}
-
-    # ── Health check ───────────────────────────────────────
-
-    def health_check(self) -> bool:
-        """Check if the helpdesk API is reachable."""
-        url = f"{self.base_url}/api/v1/whatsapp/health"
-        try:
-            response = httpx.get(url, timeout=10)
-            return response.status_code == 200
-        except Exception:
-            return False
-
-    # ── User Registration Check ──────────────────────────
-
-    def check_user_registration(
-        self,
-        phone_number: str,
-        tenant_id: str | UUID | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Check if a phone number is registered to a user account in the helpdesk.
-        Returns user details if registered, or None if not registered or on error.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/users/check-registration"
-        params = {
-            "phone_number": phone_number,
-            "tenant_id": self._tenant_id(tenant_id),
-        }
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info("No user registered for phone %s in helpdesk", phone_number)
-                return {"is_registered": False, "phone_number": phone_number}
-            logger.error(
-                "Helpdesk API error checking user registration (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error checking user registration: %s", e
-            )
-            return None
-
-    # ── Phone-User Linking ────────────────────────────────
-
-    def link_phone_to_user(
-        self,
-        phone_number: str,
-        user_id: str | UUID,
-        tenant_id: str | UUID | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Link a phone number to a user ID in the helpdesk system.
-        This allows the middleware to register a WhatsApp phone number
-        to an existing helpdesk user account.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/users/link-phone"
-        payload = {
-            "phone_number": phone_number,
-            "user_id": str(user_id),
-            "tenant_id": self._tenant_id(tenant_id),
-        }
-
-        try:
-            response = httpx.post(
-                url,
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error linking phone to user (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error linking phone to user: %s", e
-            )
-            return None
-
-    # ── Ticket Creation ──────────────────────────────────
-
-    def create_ticket(
-        self,
-        tenant_id: str | UUID,
+        tenant_slug: str,
         title: str,
+        user_id: str | UUID,
         description: str | None = None,
-        creator_id: str | UUID | None = None,
-        customer_id: str | UUID | None = None,
         category: str | None = None,
-        priority: str | None = None,
-        channel: str | None = None,
-        phone_number: str | None = None,
         cc_emails: list[str] | None = None,
     ) -> dict[str, Any] | None:
-        """
-        Create a ticket in the helpdesk backend with full details.
-        This is the main endpoint for creating tickets from the middleware.
-        
-        Args:
-            tenant_id: The tenant UUID
-            title: Ticket title/subject
-            description: Ticket description
-            creator_id: The user ID who is creating the ticket (optional)
-            customer_id: The customer ID (optional)
-            category: Category name (optional)
-            priority: Priority name (optional)
-            channel: Channel name (optional)
-            phone_number: WhatsApp phone number (optional, for WhatsApp-originated tickets)
-            cc_emails: CC email addresses (optional)
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/create"
-        payload = {
-            "tenant_id": self._tenant_id(tenant_id),
-            "title": title,
-            "description": description,
-            "creator_id": str(creator_id) if creator_id else None,
-            "customer_id": str(customer_id) if customer_id else None,
-            "category": category,
-            "priority": priority,
-            "channel": channel,
-            "phone_number": phone_number,
-            "cc_emails": cc_emails if cc_emails else None,
+        """Create a ticket as the registered user. Returns the ticket or None."""
+        payload: dict[str, Any] = {
+            'user_id': str(user_id),
+            'title': title,
+            'description': description,
+            'category': category,
+            'cc_emails': cc_emails or None,
         }
-        # Remove None values
         payload = {k: v for k, v in payload.items() if v is not None}
-
-        try:
-            response = httpx.post(
-                url,
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            result = response.json()
-            logger.info(
-                "Ticket created in helpdesk backend: #%s (category=%s)",
-                result.get("ticket_number", "?"),
-                result.get("category", "?"),
-            )
-            return result
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error creating ticket (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
+        self.last_error = None
+        response = self._request('POST', '/tickets', tenant_slug, json=payload)
+        if response is None:
             return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error creating ticket: %s", e
-            )
+        if response.status_code not in (200, 201):
+            self._log_http_error('creating ticket', response)
+            if 400 <= response.status_code < 500:
+                try:
+                    detail = response.json().get('detail')
+                except ValueError:
+                    detail = None
+                if isinstance(detail, str) and detail.strip():
+                    self.last_error = detail.strip()[:200]
             return None
+        result = _normalize_ticket(response.json())
+        logger.info('Helpdesk ticket created: #%s (tenant=%s)', result.get('ticket_number', '?'), tenant_slug)
+        return result
 
-    # ── My Tickets (for registered users) ──────────────────
+    def get_ticket_status(
+        self, ticket_number: str, tenant_slug: str, user_id: str | UUID
+    ) -> dict[str, Any] | None:
+        """Get one ticket by number, only if it is visible to ``user_id``."""
+        response = self._request(
+            'GET',
+            f'/tickets/by-number/{quote(ticket_number, safe="")}',
+            tenant_slug,
+            params={'user_id': str(user_id)},
+        )
+        if response is None:
+            return None
+        if response.status_code == 404:
+            logger.info('Ticket %s not found/visible in tenant %s', ticket_number, tenant_slug)
+            return None
+        if response.status_code != 200:
+            self._log_http_error('fetching ticket', response)
+            return None
+        return _normalize_ticket(response.json())
 
     def get_my_tickets(
         self,
         user_id: str | UUID,
-        tenant_id: str | UUID,
+        tenant_slug: str,
         status_name: str | None = None,
         skip: int = 0,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """
-        Get tickets visible to a registered user, respecting their permissions.
-        Same visibility rules as the main helpdesk portal.
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/my-tickets"
-        params: dict[str, Any] = {
-            "user_id": str(user_id),
-            "tenant_id": self._tenant_id(tenant_id),
-            "skip": skip,
-            "limit": limit,
-        }
+        """Tickets visible to a registered user (same visibility as the portal)."""
+        params: dict[str, Any] = {'user_id': str(user_id), 'skip': skip, 'limit': limit}
         if status_name:
-            params["status_name"] = status_name
-
-        try:
-            response = httpx.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Helpdesk API error fetching my tickets (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return {"tickets": [], "total": 0, "page": 1, "per_page": limit}
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error fetching my tickets: %s", e
-            )
-            return {"tickets": [], "total": 0, "page": 1, "per_page": limit}
-
-    # ── Add Comment As Registered User ─────────────────────
+            params['status_name'] = status_name
+        empty = {'tickets': [], 'total': 0, 'page': 1, 'per_page': limit}
+        response = self._request('GET', '/tickets', tenant_slug, params=params)
+        if response is None:
+            return empty
+        if response.status_code != 200:
+            self._log_http_error('fetching my tickets', response)
+            return empty
+        data = response.json()
+        data['tickets'] = [_normalize_ticket(t) for t in data.get('tickets', [])]
+        return data
 
     def add_comment_as_user(
-        self,
-        ticket_number: str,
-        user_id: str | UUID,
-        tenant_id: str | UUID,
-        message: str,
+        self, ticket_number: str, user_id: str | UUID, tenant_slug: str, message: str
     ) -> dict[str, Any] | None:
-        """
-        Add a comment to a ticket as a registered helpdesk user via WhatsApp.
-        Uses CommentTimelineService which handles email tracking (same as portal).
-        """
-        url = f"{self.base_url}/api/v1/whatsapp/tickets/{ticket_number}/comment-as-user"
-        payload = {
-            "user_id": str(user_id),
-            "tenant_id": self._tenant_id(tenant_id),
-            "message": message,
-        }
+        """Add a comment to a ticket as a registered user."""
+        response = self._request(
+            'POST',
+            f'/tickets/by-number/{quote(ticket_number, safe="")}/comments',
+            tenant_slug,
+            json={'user_id': str(user_id), 'message': message},
+        )
+        if response is None:
+            return None
+        if response.status_code == 404:
+            logger.info('Ticket %s not found/visible for comment in tenant %s', ticket_number, tenant_slug)
+            return {'success': False, 'message': 'Ticket not found'}
+        if response.status_code == 400:
+            try:
+                detail = response.json().get('detail')
+            except ValueError:
+                detail = None
+            return {'success': False, 'message': detail or 'Comment rejected'}
+        if response.status_code not in (200, 201):
+            self._log_http_error('adding comment', response)
+            return None
+        return response.json()
 
+    # ── Health ─────────────────────────────────────────────
+
+    def health_check(self) -> bool:
+        """Check that the helpdesk API host is reachable."""
+        root = self.base_url.rsplit('/api/', 1)[0]
         try:
-            response = httpx.post(
-                url,
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info(
-                    "Ticket %s not found for adding comment as user", ticket_number
-                )
-                return None
-            logger.error(
-                "Helpdesk API error adding comment as user (status %s): %s",
-                e.response.status_code,
-                e.response.text,
-            )
-            return None
-        except httpx.RequestError as e:
-            logger.error(
-                "Helpdesk API request error adding comment as user: %s", e
-            )
-            return None
+            return httpx.get(f'{root}/api/health', timeout=10).status_code < 500
+        except Exception:
+            return False

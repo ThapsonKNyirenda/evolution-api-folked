@@ -22,7 +22,7 @@ def bootstrap_default_instance(db: Session) -> None:
 
         tenant = tenants.get_by_name(tenant_name)
         if not tenant:
-            tenant = tenants.create(tenant_name)
+            tenant = tenants.create(tenant_name, helpdesk_tenant_slug=settings.default_tenant_slug.strip().lower() or None)
             logger.info('Created default tenant %s', tenant_name)
 
         link = links.get_by_instance(instance_name)
